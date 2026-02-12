@@ -196,7 +196,7 @@ def generate_content(topic, style='default', extra_instructions=''):
 
     Args:
         topic: 主题/关键词
-        style: 文案风格 (default/review/tutorial/daily)
+        style: 文案风格 (default/review/tutorial/daily/listicle/story/debate/comparison)
         extra_instructions: 额外指令
 
     Returns:
@@ -302,7 +302,7 @@ def main():
     p_gen = sub.add_parser('generate', help='生成小红书内容')
     p_gen.add_argument('topic', help='主题/关键词')
     p_gen.add_argument('--style', '-s', default='default',
-                       help='文案风格: default/review/tutorial/daily')
+                       help='文案风格: default/review/tutorial/daily/listicle/story/debate/comparison')
     p_gen.add_argument('--extra', '-e', help='额外指令')
     p_gen.add_argument('--save', action='store_true', help='保存到文件')
 
