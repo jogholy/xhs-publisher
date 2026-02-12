@@ -353,6 +353,48 @@ python3 scripts/trending.py topics --limit 10
 python3 scripts/trending.py sources
 ```
 
+## 笔记互动数据
+
+从创作者中心「内容管理」页抓取每篇笔记的阅读、点赞、收藏、评论、分享数据。
+
+### 抓取互动数据
+
+```bash
+# 抓取最近 20 篇笔记的互动数据
+python3 scripts/xhs_auto.py engagement fetch --limit 20 --headless
+
+# 查看缓存数据（不启动浏览器）
+python3 scripts/xhs_auto.py engagement cached
+```
+
+### 生成每日报告
+
+```bash
+# 完整报告（含互动数据抓取）
+python3 scripts/xhs_auto.py engagement report --headless
+
+# JSON 格式
+python3 scripts/xhs_auto.py engagement report --headless --json
+
+# 仅发布统计（不抓取互动数据）
+python3 scripts/xhs_auto.py engagement report --no-engagement
+```
+
+报告内容包括：
+- 今日/累计发布数、成功率
+- 热门标签
+- 总阅读、点赞、收藏、评论、分享数
+- 最佳笔记（按点赞+收藏排名）
+- 各笔记明细数据
+
+也可独立使用：
+
+```bash
+python3 scripts/engagement.py fetch --limit 20 --headless
+python3 scripts/engagement.py report --headless --json
+python3 scripts/engagement.py cached
+```
+
 ## 发布数据统计
 
 基于 `logs/report_*.json` 汇总发布历史、成功率、标签分布等。

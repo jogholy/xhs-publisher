@@ -989,6 +989,47 @@ def cmd_comments(args):
         ctx.close()
 
 
+def cmd_engagement(args):
+    """笔记互动数据"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from engagement import fetch_note_engagement, generate_daily_report, format_daily_report, _load_engagement_db
+
+    if args.engagement_action == 'cached':
+        db = _load_engagement_db()
+        if db.get('snapshots'):
+            print(json.dumps(db['snapshots'][-1], ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({"message": "暂无缓存数据"}, ensure_ascii=False))
+        return
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        ctx = create_browser_context(pw, headless=getattr(args, 'headless', False))
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+        if not check_login(page):
+            print(json.dumps({"success": False, "error": "未登录"}, ensure_ascii=False))
+            ctx.close()
+            sys.exit(1)
+
+        if args.engagement_action == 'fetch':
+            notes = fetch_note_engagement(page, limit=args.limit)
+            print(json.dumps(notes, ensure_ascii=False, indent=2))
+        elif args.engagement_action == 'report':
+            no_eng = getattr(args, 'no_engagement', False)
+            report = generate_daily_report(
+                include_engagement=not no_eng,
+                page=page if not no_eng else None,
+            )
+            if getattr(args, 'json', False):
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(format_daily_report(report))
+
+        ctx.close()
+
+
 def cmd_keystore(args):
     """API Key 加密管理"""
     sys.path.insert(0, str(Path(__file__).parent))
@@ -1206,6 +1247,15 @@ def main():
     p_comments.add_argument('--dry-run', action='store_true', help='只生成回复不实际发送')
     p_comments.add_argument('--headless', action='store_true', help='无头模式')
 
+    # engagement - 笔记互动数据
+    p_eng = sub.add_parser('engagement', help='笔记互动数据（阅读/点赞/收藏/评论）')
+    p_eng.add_argument('engagement_action', choices=['fetch', 'report', 'cached'],
+                       help='操作: fetch=抓取数据, report=每日报告, cached=查看缓存')
+    p_eng.add_argument('--limit', type=int, default=20, help='笔记数量（默认20）')
+    p_eng.add_argument('--headless', action='store_true', help='无头模式')
+    p_eng.add_argument('--no-engagement', action='store_true', help='报告中不抓取互动数据')
+    p_eng.add_argument('--json', action='store_true', help='JSON 输出')
+
     # keystore - API Key 加密管理
     p_key = sub.add_parser('keystore', help='API Key 加密管理')
     p_key.add_argument('key_action', choices=['status', 'migrate', 'list', 'set', 'get'],
@@ -1235,6 +1285,8 @@ def main():
         cmd_stats(args)
     elif args.command == 'comments':
         cmd_comments(args)
+    elif args.command == 'engagement':
+        cmd_engagement(args)
     elif args.command == 'keystore':
         cmd_keystore(args)
     else:
