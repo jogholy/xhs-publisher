@@ -938,6 +938,57 @@ def cmd_hot(args):
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_stats(args):
+    """发布数据统计"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from stats import load_reports, filter_by_date, summary, format_text
+
+    reports = load_reports()
+    reports = filter_by_date(reports, days=getattr(args, 'days', None), date_str=getattr(args, 'date', None))
+    stats_data = summary(reports)
+
+    if getattr(args, 'json', False):
+        print(json.dumps(stats_data, ensure_ascii=False, indent=2))
+    else:
+        print(format_text(stats_data))
+
+
+def cmd_comments(args):
+    """评论自动互动"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from comments import fetch_comments, auto_reply, get_reply_stats, format_reply_results
+
+    if args.comments_action == 'stats':
+        print(json.dumps(get_reply_stats(), ensure_ascii=False, indent=2))
+        return
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        ctx = create_browser_context(pw, headless=getattr(args, 'headless', False))
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+        if not check_login(page):
+            print(json.dumps({"success": False, "error": "未登录，请先执行 login 命令"}, ensure_ascii=False))
+            ctx.close()
+            sys.exit(1)
+
+        if args.comments_action == 'fetch':
+            comments = fetch_comments(page, limit=args.limit)
+            print(json.dumps(comments, ensure_ascii=False, indent=2))
+        elif args.comments_action == 'reply':
+            results = auto_reply(
+                page,
+                limit=args.limit,
+                style=args.style,
+                dry_run=getattr(args, 'dry_run', False),
+            )
+            print(format_reply_results(results))
+            print("\n" + json.dumps(results, ensure_ascii=False, indent=2))
+
+        ctx.close()
+
+
 def cmd_keystore(args):
     """API Key 加密管理"""
     sys.path.insert(0, str(Path(__file__).parent))
@@ -1139,6 +1190,22 @@ def main():
     p_hot.add_argument('--headless', action='store_true', help='无头模式')
     p_hot.add_argument('--image-count', type=int, default=3, help='自动生成图片数量（1-9，默认3）')
 
+    # stats - 发布数据统计
+    p_stats2 = sub.add_parser('stats', help='发布数据统计')
+    p_stats2.add_argument('--days', type=int, help='最近 N 天')
+    p_stats2.add_argument('--date', type=str, help='指定日期 (YYYY-MM-DD)')
+    p_stats2.add_argument('--json', action='store_true', help='JSON 输出')
+
+    # comments - 评论自动互动
+    p_comments = sub.add_parser('comments', help='评论自动互动')
+    p_comments.add_argument('comments_action', choices=['fetch', 'reply', 'stats'],
+                            help='操作: fetch=抓取评论, reply=自动回复, stats=回复统计')
+    p_comments.add_argument('--limit', type=int, default=10, help='评论数量（默认10）')
+    p_comments.add_argument('--style', choices=['friendly', 'professional', 'humorous', 'brief'],
+                            default='friendly', help='回复风格')
+    p_comments.add_argument('--dry-run', action='store_true', help='只生成回复不实际发送')
+    p_comments.add_argument('--headless', action='store_true', help='无头模式')
+
     # keystore - API Key 加密管理
     p_key = sub.add_parser('keystore', help='API Key 加密管理')
     p_key.add_argument('key_action', choices=['status', 'migrate', 'list', 'set', 'get'],
@@ -1164,6 +1231,10 @@ def main():
         cmd_trending(args)
     elif args.command == 'hot':
         cmd_hot(args)
+    elif args.command == 'stats':
+        cmd_stats(args)
+    elif args.command == 'comments':
+        cmd_comments(args)
     elif args.command == 'keystore':
         cmd_keystore(args)
     else:

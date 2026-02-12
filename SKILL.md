@@ -353,6 +353,93 @@ python3 scripts/trending.py topics --limit 10
 python3 scripts/trending.py sources
 ```
 
+## 发布数据统计
+
+基于 `logs/report_*.json` 汇总发布历史、成功率、标签分布等。
+
+### 查看统计
+
+```bash
+# 全部统计
+python3 scripts/xhs_auto.py stats
+
+# 最近 7 天
+python3 scripts/xhs_auto.py stats --days 7
+
+# 指定日期
+python3 scripts/xhs_auto.py stats --date 2026-02-12
+
+# JSON 输出
+python3 scripts/xhs_auto.py stats --json
+```
+
+统计内容包括：
+- 总发布数、成功/失败数、成功率
+- 平均正文长度
+- 每日发布数量
+- 热门标签 Top 10
+- 最近 5 篇发布记录
+- 失败记录及错误原因
+
+也可独立使用：
+
+```bash
+python3 scripts/stats.py --days 7 --json
+```
+
+## 评论自动互动
+
+通过 Playwright 抓取小红书创作者中心的评论，用 AI 生成个性化回复并自动发送。
+
+### 抓取评论
+
+```bash
+python3 scripts/xhs_auto.py comments fetch --limit 20
+```
+
+从创作者中心评论管理页抓取未回复的评论，返回 JSON 列表。
+
+### 自动回复评论
+
+```bash
+# 试运行（只生成回复，不实际发送）
+python3 scripts/xhs_auto.py comments reply --limit 10 --style friendly --dry-run
+
+# 正式回复
+python3 scripts/xhs_auto.py comments reply --limit 10 --style friendly
+
+# 无头模式
+python3 scripts/xhs_auto.py comments reply --limit 5 --style humorous --headless
+```
+
+回复风格：
+- `friendly` — 友好亲切，像朋友聊天（默认）
+- `professional` — 专业有深度
+- `humorous` — 幽默风趣，适当用网络流行语和 emoji
+- `brief` — 简短精炼，一两句话
+
+### 回复统计
+
+```bash
+python3 scripts/xhs_auto.py comments stats
+```
+
+### 安全机制
+
+- 已回复的评论自动跳过（基于 `data/comments.json` 去重）
+- 每条回复间隔 3 秒，避免频率过高
+- 回复长度限制 10-80 字，保持自然
+- 支持 dry-run 预览，确认后再正式回复
+- 回复记录最多保留 2000 条，自动清理
+
+也可独立使用：
+
+```bash
+python3 scripts/comments.py fetch --limit 10
+python3 scripts/comments.py reply --limit 5 --style friendly --dry-run
+python3 scripts/comments.py stats
+```
+
 ## 与 OpenClaw 集成
 
 ### 对话中使用
@@ -368,6 +455,11 @@ python3 scripts/trending.py sources
 - "看看现在有什么热点"
 - "根据今天的热搜写一篇小红书"
 - "用第 3 个热点生成一篇测评笔记"
+- "查看发布统计"
+- "看看最近 7 天发了多少篇"
+- "自动回复评论"
+- "用幽默风格回复最近 5 条评论"
+- "先预览评论回复，不要发送"
 - "检查小红书登录状态"
 - "登录小红书"
 - "列出小红书文案风格"
