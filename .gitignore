@@ -1,15 +1,22 @@
-# 运行时生成的目录
+# 浏览器登录数据（含凭据）
 browser_data/
+
+# 加密密钥
+keys.enc
+.salt
+
+# 生成的内容和截图
 content/
 screenshots/
+
+# 日志
 logs/
 
-# Python
+# Python 缓存
 __pycache__/
 *.pyc
 *.pyo
-.env
 
-# OS
+# 系统文件
 .DS_Store
 Thumbs.db

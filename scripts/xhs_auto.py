@@ -47,19 +47,25 @@ XHS_LOGIN = 'https://creator.xiaohongshu.com/login'
 
 
 def create_browser_context(playwright, headless=False):
-    """创建持久化浏览器上下文"""
+    """创建持久化浏览器上下文（含反检测）"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from stealth import random_user_agent, random_viewport, get_stealth_args, get_stealth_ignore_args, apply_stealth
+
+    ua = random_user_agent()
+    vp = random_viewport()
+    log.info(f'浏览器指纹: UA={ua[:50]}... viewport={vp["width"]}x{vp["height"]}')
+
     context = playwright.chromium.launch_persistent_context(
         user_data_dir=str(BROWSER_DATA),
         headless=headless,
-        viewport={'width': 1280, 'height': 900},
+        viewport=vp,
+        user_agent=ua,
         locale='zh-CN',
         timezone_id='Asia/Shanghai',
-        args=[
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-        ],
-        ignore_default_args=['--enable-automation'],
+        args=get_stealth_args(),
+        ignore_default_args=get_stealth_ignore_args(),
     )
+    apply_stealth(context)
     return context
 
 
@@ -148,9 +154,9 @@ def do_login(page, timeout=300):
     raise TimeoutError(f'登录超时（{timeout}秒），请重试')
 
 
-def publish_note(page, title, content, tags=None, images=None, dry_run=False, auto_image=True):
+def publish_note(page, title, content, tags=None, images=None, dry_run=False, auto_image=True, image_count=1):
     """
-    发布小红书笔记
+    发布小红书笔记（含错误恢复）
 
     Args:
         page: Playwright page 对象
@@ -160,11 +166,21 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
         images: 图片路径列表（可选，不传则自动生成配图）
         dry_run: 试运行，不实际点击发布
         auto_image: 没有图片时是否自动用 AI 生成配图（默认 True）
+        image_count: 自动生成图片数量（1-9，默认 1，仅在 auto_image 且无 images 时生效）
     """
+    sys.path.insert(0, str(Path(__file__).parent))
+    from recovery import safe_navigate, save_error_snapshot, check_page_health, recover_page
+
     log.info(f'开始发布笔记: {title}')
 
-    # 1. 导航到发布页
-    page.goto(XHS_PUBLISH, wait_until='domcontentloaded', timeout=15000)
+    # 1. 导航到发布页（带重试）
+    try:
+        safe_navigate(page, XHS_PUBLISH, timeout=20000, retries=3)
+    except Exception as e:
+        log.error(f'导航到发布页失败: {e}')
+        shot = save_error_snapshot(page, 'nav_publish_fail')
+        _save_report(title, content, tags, False, f'导航失败: {e}')
+        return {'success': False, 'error': f'导航到发布页失败: {e}', 'screenshot': shot}
     time.sleep(5)
 
     # 2. 用 JS 点击「上传图文」TAB（避免视口外点击失败）
@@ -190,13 +206,27 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
     # 3. 上传图片（无图片时自动 AI 生成配图）
     image_paths = images or []
     if not image_paths and auto_image:
-        log.info('未提供图片，自动生成 AI 配图...')
-        generated = _auto_generate_image(title, content)
-        if generated:
-            image_paths = [generated]
-            log.info(f'AI 配图生成成功: {generated}')
+        if image_count > 1:
+            log.info(f'未提供图片，自动生成 {image_count} 张 AI 配图...')
+            generated = _auto_generate_multi_images(title, content, count=image_count)
+            if generated:
+                image_paths = generated
+                log.info(f'多图生成完成: {len(generated)} 张')
+            else:
+                log.warning('多图生成全部失败，尝试单张...')
+                single = _auto_generate_image(title, content)
+                if single:
+                    image_paths = [single]
         else:
-            log.warning('AI 配图生成失败，使用默认封面')
+            log.info('未提供图片，自动生成 AI 配图...')
+            generated = _auto_generate_image(title, content)
+            if generated:
+                image_paths = [generated]
+                log.info(f'AI 配图生成成功: {generated}')
+            else:
+                log.warning('AI 配图生成失败，使用默认封面')
+
+        if not image_paths:
             default_cover = CONTENT_DIR / 'default_cover.png'
             if not default_cover.exists():
                 _generate_default_cover(default_cover, title)
@@ -211,7 +241,9 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
         upload_input = page.locator('input[type="file"]').first
         upload_input.set_input_files(image_paths)
         log.info(f'已上传 {len(image_paths)} 张图片')
-        time.sleep(8)  # 等待上传和页面渲染
+        # 多图上传需要更长等待时间
+        wait_sec = max(8, len(image_paths) * 4)
+        time.sleep(wait_sec)
     except Exception as e:
         log.warning(f'图片上传失败: {e}')
 
@@ -256,36 +288,52 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
             'screenshot': str(pre_publish_shot)
         }
 
-    try:
-        publish_btn = page.locator('button:has-text("发布")').last
-        publish_btn.click()
-        log.info('已点击发布按钮')
-        time.sleep(8)
+    # 发布（带重试）
+    max_publish_retries = 3
+    for attempt in range(1, max_publish_retries + 1):
+        try:
+            # 检查页面健康
+            health = check_page_health(page)
+            if not health['ok']:
+                log.warning(f'发布前页面异常: {health.get("error")}，尝试恢复...')
+                if not recover_page(page, XHS_PUBLISH):
+                    raise RuntimeError('页面恢复失败')
 
-        # 发布后截图
-        post_shot = SCREENSHOTS_DIR / f'published_{datetime.now():%Y%m%d_%H%M%S}.png'
-        page.screenshot(path=str(post_shot))
-        log.info(f'发布完成！截图: {post_shot}')
+            publish_btn = page.locator('button:has-text("发布")').last
+            publish_btn.wait_for(state='visible', timeout=5000)
+            publish_btn.click()
+            log.info('已点击发布按钮')
+            time.sleep(8)
 
-        # 保存发布记录
-        _save_report(title, content, tags, True)
+            # 发布后截图
+            post_shot = SCREENSHOTS_DIR / f'published_{datetime.now():%Y%m%d_%H%M%S}.png'
+            page.screenshot(path=str(post_shot))
+            log.info(f'发布完成！截图: {post_shot}')
 
-        return {
-            'success': True,
-            'title': title,
-            'screenshot': str(post_shot)
-        }
+            # 保存发布记录
+            _save_report(title, content, tags, True)
 
-    except Exception as e:
-        log.error(f'发布失败: {e}')
-        err_shot = SCREENSHOTS_DIR / f'error_{datetime.now():%Y%m%d_%H%M%S}.png'
-        page.screenshot(path=str(err_shot))
-        _save_report(title, content, tags, False, str(e))
-        return {
-            'success': False,
-            'error': str(e),
-            'screenshot': str(err_shot)
-        }
+            return {
+                'success': True,
+                'title': title,
+                'screenshot': str(post_shot)
+            }
+
+        except Exception as e:
+            log.warning(f'发布尝试 {attempt}/{max_publish_retries} 失败: {e}')
+            save_error_snapshot(page, f'publish_retry{attempt}')
+            if attempt < max_publish_retries:
+                time.sleep(5)
+            else:
+                log.error(f'发布在 {max_publish_retries} 次尝试后仍失败: {e}')
+                err_shot = save_error_snapshot(page, 'publish_final_fail')
+                _save_report(title, content, tags, False, str(e))
+                return {
+                    'success': False,
+                    'error': str(e),
+                    'screenshot': err_shot,
+                    'retries': max_publish_retries,
+                }
 
 
 def _add_tags(page, tags):
@@ -366,6 +414,98 @@ def _auto_generate_image(title, content):
     except Exception as e:
         log.warning(f'AI 配图生成异常: {e}')
         return None
+
+
+def _split_content_sections(content):
+    """将正文按段落/小标题拆分成若干段，用于生成分段配图"""
+    import re
+    sections = []
+    current = []
+    for line in content.split('\n'):
+        stripped = line.strip()
+        # 遇到小标题时切段
+        if re.match(r'^[【\[#✅❌🔥💡📌🎯🏷️📝]', stripped) and current:
+            text = '\n'.join(current).strip()
+            if len(text) > 15:
+                sections.append(text)
+            current = []
+        if stripped:
+            current.append(stripped)
+    if current:
+        text = '\n'.join(current).strip()
+        if len(text) > 15:
+            sections.append(text)
+    return sections if sections else [content]
+
+
+def _auto_generate_multi_images(title, content, count=3):
+    """
+    根据笔记标题和正文自动生成多张 AI 配图。
+    第 1 张为封面（3:4 竖版），后续为内容图（3:4 竖版）。
+    每张图的 prompt 基于对应的内容段落，确保图文匹配。
+
+    Args:
+        title: 笔记标题
+        content: 笔记正文
+        count: 生成图片数量（1-9，默认 3）
+
+    Returns:
+        list[str]: 生成成功的图片路径列表（可能少于 count）
+    """
+    count = max(1, min(9, count))
+    sys.path.insert(0, str(Path(__file__).parent))
+    from image_gen import generate_image
+
+    # 拆分内容段落
+    sections = _split_content_sections(content)
+
+    # 构建每张图的 prompt
+    prompts = []
+
+    # 封面：突出标题，吸引眼球
+    prompts.append(
+        f"为小红书笔记生成一张精美封面图。"
+        f"标题：{title}。"
+        f"要求：高质量、吸引眼球、色彩鲜明、3:4竖版构图、适合社交媒体封面、"
+        f"画面干净有设计感、不要包含文字"
+    )
+
+    # 内容图：每张对应一个段落
+    for i in range(1, count):
+        if i - 1 < len(sections):
+            section = sections[i - 1][:150]
+        else:
+            # 段落不够时，用标题+序号生成变体
+            section = f"{title} 第{i}部分"
+        prompts.append(
+            f"为小红书笔记生成一张内容配图（第{i+1}张）。"
+            f"笔记标题：{title}。"
+            f"本页内容：{section}。"
+            f"要求：高质量、3:4竖版构图、与内容相关、风格统一、不要包含文字"
+        )
+
+    # 逐张生成
+    generated = []
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    for idx, prompt in enumerate(prompts):
+        suffix = 'cover' if idx == 0 else f'page{idx}'
+        output_path = str(CONTENT_DIR / f'ai_{suffix}_{ts}.png')
+        log.info(f'生成第 {idx+1}/{count} 张图片...')
+        try:
+            result = generate_image(prompt, output_path, resolution='1K')
+            if result['success']:
+                generated.append(output_path)
+                log.info(f'  ✓ 第 {idx+1} 张成功 [{result["engine"]}]: {output_path}')
+            else:
+                log.warning(f'  ✗ 第 {idx+1} 张失败: {result.get("error", "未知")}')
+        except Exception as e:
+            log.warning(f'  ✗ 第 {idx+1} 张异常: {e}')
+        # 请求间隔，避免触发 API 速率限制
+        if idx < len(prompts) - 1:
+            time.sleep(5)
+
+    log.info(f'多图生成完成: {len(generated)}/{count} 张成功')
+    return generated
 
 
 def _generate_default_cover(path, title=''):
@@ -524,7 +664,8 @@ def cmd_publish(args):
             tags=tags,
             images=images,
             dry_run=args.dry_run,
-            auto_image=not args.no_auto_image
+            auto_image=not args.no_auto_image,
+            image_count=args.image_count
         )
 
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -551,6 +692,374 @@ def cmd_status(args):
         ctx.close()
 
 
+def cmd_generate(args):
+    """AI 生成内容"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from content_gen import generate_content, save_content, list_templates
+
+    if args.list_styles:
+        templates = list_templates()
+        print(json.dumps(templates, ensure_ascii=False, indent=2))
+        return
+
+    if not args.topic:
+        print(json.dumps({'success': False, 'error': '必须提供主题 (--topic)'}, ensure_ascii=False))
+        sys.exit(1)
+
+    try:
+        result = generate_content(
+            topic=args.topic,
+            style=args.style,
+            extra_instructions=args.extra or '',
+        )
+        path = save_content(result)
+        result['saved_to'] = path
+        log.info(f'内容已生成并保存: {path}')
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except Exception as e:
+        log.error(f'内容生成失败: {e}')
+        print(json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
+
+def cmd_schedule(args):
+    """定时发布管理"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from schedule import (add_task, remove_task, list_tasks, get_task,
+                          toggle_task, format_task_summary, update_cron_job_id)
+
+    action = args.schedule_action
+
+    if action == 'list':
+        tasks = list_tasks()
+        if not tasks:
+            print(json.dumps({'tasks': [], 'message': '暂无定时任务'}, ensure_ascii=False))
+            return
+        result = []
+        for tid, task in tasks.items():
+            result.append({**task, 'summary': format_task_summary(task)})
+        print(json.dumps({'tasks': result, 'count': len(result)}, ensure_ascii=False, indent=2))
+
+    elif action == 'add':
+        if not args.topic:
+            print(json.dumps({'success': False, 'error': '必须提供 --topic'}, ensure_ascii=False))
+            sys.exit(1)
+        if not args.cron_expr and not args.at_time and not args.every_minutes:
+            print(json.dumps({'success': False, 'error': '必须指定调度方式: --cron / --at / --every'}, ensure_ascii=False))
+            sys.exit(1)
+
+        result = add_task(
+            topic=args.topic,
+            style=args.style,
+            extra=args.extra or '',
+            cron_expr=args.cron_expr,
+            at_time=args.at_time,
+            every_minutes=int(args.every_minutes) if args.every_minutes else None,
+            tz=args.tz,
+            headless=True,
+            name=args.name,
+        )
+
+        # 输出 cron_job 供 agent 调用 OpenClaw cron API 创建
+        print(json.dumps({
+            'success': True,
+            'task_id': result['task_id'],
+            'cron_job': result['cron_job'],
+            'message': '本地任务已创建，请用 cron tool 的 add action 将 cron_job 提交给 OpenClaw',
+            'summary': format_task_summary(result['local_record']),
+        }, ensure_ascii=False, indent=2))
+
+    elif action == 'remove':
+        if not args.task_id:
+            print(json.dumps({'success': False, 'error': '必须提供 --task-id'}, ensure_ascii=False))
+            sys.exit(1)
+        cron_job_id = remove_task(args.task_id)
+        print(json.dumps({
+            'success': True,
+            'task_id': args.task_id,
+            'cron_job_id': cron_job_id,
+            'message': f'本地任务已删除。' + (f'请用 cron tool remove 删除 OpenClaw cron job: {cron_job_id}' if cron_job_id else '无关联的 cron job'),
+        }, ensure_ascii=False, indent=2))
+
+    elif action == 'enable':
+        if not args.task_id:
+            print(json.dumps({'success': False, 'error': '必须提供 --task-id'}, ensure_ascii=False))
+            sys.exit(1)
+        task = toggle_task(args.task_id, True)
+        if task:
+            print(json.dumps({
+                'success': True, 'task_id': args.task_id, 'enabled': True,
+                'cron_job_id': task.get('cron_job_id'),
+                'message': '已启用。' + (f'请用 cron tool update 启用 OpenClaw cron job: {task.get("cron_job_id")}' if task.get('cron_job_id') else ''),
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({'success': False, 'error': f'任务不存在: {args.task_id}'}, ensure_ascii=False))
+
+    elif action == 'disable':
+        if not args.task_id:
+            print(json.dumps({'success': False, 'error': '必须提供 --task-id'}, ensure_ascii=False))
+            sys.exit(1)
+        task = toggle_task(args.task_id, False)
+        if task:
+            print(json.dumps({
+                'success': True, 'task_id': args.task_id, 'enabled': False,
+                'cron_job_id': task.get('cron_job_id'),
+                'message': '已暂停。' + (f'请用 cron tool update 暂停 OpenClaw cron job: {task.get("cron_job_id")}' if task.get('cron_job_id') else ''),
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({'success': False, 'error': f'任务不存在: {args.task_id}'}, ensure_ascii=False))
+
+    elif action == 'link':
+        # 回填 cron_job_id
+        if not args.task_id or not args.cron_job_id:
+            print(json.dumps({'success': False, 'error': '必须提供 --task-id 和 --cron-job-id'}, ensure_ascii=False))
+            sys.exit(1)
+        ok = update_cron_job_id(args.task_id, args.cron_job_id)
+        print(json.dumps({'success': ok, 'task_id': args.task_id, 'cron_job_id': args.cron_job_id}, ensure_ascii=False))
+
+    else:
+        print(json.dumps({'success': False, 'error': f'未知操作: {action}'}, ensure_ascii=False))
+        sys.exit(1)
+
+
+def cmd_trending(args):
+    """热点数据采集"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from trending import fetch_trending, fetch_all_trending, get_top_topics, format_trending_text, SOURCES
+
+    action = args.trending_action
+
+    if action == 'sources':
+        for key, info in SOURCES.items():
+            print(f"  {info['emoji']} {key} — {info['name']}")
+        return
+
+    if action == 'topics':
+        topics = get_top_topics(limit=args.limit)
+        print(json.dumps(topics, ensure_ascii=False, indent=2))
+        return
+
+    # fetch
+    if args.no_cache:
+        data = fetch_trending(sources=args.sources, limit=args.limit)
+    else:
+        data = fetch_all_trending(limit=args.limit)
+        if args.sources:
+            data = {k: v for k, v in data.items() if k in args.sources or k.startswith('_')}
+
+    if args.text:
+        print(format_trending_text(data, limit=args.limit))
+    else:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def cmd_hot(args):
+    """根据热点话题一键生成内容（可选发布）"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from trending import get_top_topics
+    from content_gen import generate_content, save_content
+
+    # 获取热点话题
+    topics = get_top_topics(limit=30)
+    if not topics:
+        print(json.dumps({'success': False, 'error': '获取热点失败'}, ensure_ascii=False))
+        sys.exit(1)
+
+    # 选择话题
+    if args.pick:
+        # 按序号选
+        idx = args.pick - 1
+        if idx < 0 or idx >= len(topics):
+            print(json.dumps({'success': False, 'error': f'序号超出范围 (1-{len(topics)})'}, ensure_ascii=False))
+            sys.exit(1)
+        chosen = topics[idx]
+    elif args.keyword:
+        # 按关键词匹配
+        matched = [t for t in topics if args.keyword in t['title']]
+        if not matched:
+            print(json.dumps({
+                'success': False,
+                'error': f'未匹配到含「{args.keyword}」的热点',
+                'available': [t['title'] for t in topics[:10]],
+            }, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        chosen = matched[0]
+    else:
+        # 默认取第一个非置顶热点
+        chosen = topics[0]
+
+    topic = chosen['title']
+    log.info(f'选中热点: {topic} (来源: {chosen["source"]})')
+
+    # 生成内容
+    extra = args.extra or ''
+    extra_full = f'基于当前热点话题创作，来源: {chosen["source"]}。{extra}'.strip()
+    try:
+        result = generate_content(
+            topic=topic,
+            style=args.style,
+            extra_instructions=extra_full,
+        )
+        path = save_content(result)
+        result['saved_to'] = path
+        result['hot_topic'] = chosen
+        log.info(f'热点内容已生成: {result["title"]}')
+    except Exception as e:
+        print(json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
+    if args.publish:
+        # 一键发布
+        from playwright.sync_api import sync_playwright
+        title = result['title']
+        content = result['content']
+        tags = result.get('tags', [])
+
+        with sync_playwright() as pw:
+            ctx = create_browser_context(pw, headless=args.headless)
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+            if not check_login(page):
+                print(json.dumps({'success': False, 'error': '未登录，请先执行 login 命令'}, ensure_ascii=False))
+                ctx.close()
+                sys.exit(1)
+
+            pub_result = publish_note(
+                page, title=title, content=content, tags=tags,
+                dry_run=args.dry_run, auto_image=True,
+                image_count=args.image_count,
+            )
+            pub_result['generated_content'] = path
+            pub_result['hot_topic'] = chosen
+            print(json.dumps(pub_result, ensure_ascii=False, indent=2))
+            ctx.close()
+            sys.exit(0 if pub_result['success'] else 1)
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_keystore(args):
+    """API Key 加密管理"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from keystore import encrypt_keys, decrypt_keys, get_api_key, migrate_to_encrypted, KEYS_FILE, SALT_FILE
+    import os
+
+    password = os.environ.get('XHS_KEY_PASSWORD', '')
+    action = args.key_action
+
+    if action == 'status':
+        try:
+            from cryptography.fernet import Fernet
+            has_crypto = True
+        except ImportError:
+            has_crypto = False
+        print(json.dumps({
+            'encrypted_file_exists': KEYS_FILE.exists(),
+            'encrypted_file': str(KEYS_FILE),
+            'has_cryptography': has_crypto,
+            'salt_exists': SALT_FILE.exists(),
+        }, ensure_ascii=False, indent=2))
+
+    elif action == 'migrate':
+        result = migrate_to_encrypted(password)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    elif action == 'list':
+        if not KEYS_FILE.exists():
+            print(json.dumps({'keys': [], 'message': '尚未创建加密存储'}, ensure_ascii=False))
+            return
+        try:
+            keys = decrypt_keys(password)
+            masked = {k: v[:4] + '***' + v[-4:] if len(v) > 8 else '***' for k, v in keys.items()}
+            print(json.dumps({'keys': masked}, ensure_ascii=False, indent=2))
+        except Exception as e:
+            print(json.dumps({'error': str(e)}, ensure_ascii=False))
+
+    elif action == 'set':
+        if not args.key_name or not args.key_value:
+            print(json.dumps({'success': False, 'error': '必须提供 --key-name 和 --key-value'}, ensure_ascii=False))
+            sys.exit(1)
+        existing = {}
+        if KEYS_FILE.exists():
+            try:
+                existing = decrypt_keys(password)
+            except Exception:
+                pass
+        existing[args.key_name] = args.key_value
+        path = encrypt_keys(existing, password)
+        print(json.dumps({'success': True, 'key': args.key_name, 'file': path}, ensure_ascii=False))
+
+    elif action == 'get':
+        if not args.key_name:
+            print(json.dumps({'success': False, 'error': '必须提供 --key-name'}, ensure_ascii=False))
+            sys.exit(1)
+        val = get_api_key(args.key_name, password)
+        if val:
+            print(json.dumps({'key': args.key_name, 'found': True, 'preview': val[:4] + '***'}, ensure_ascii=False))
+        else:
+            print(json.dumps({'key': args.key_name, 'found': False}, ensure_ascii=False))
+
+
+def cmd_generate_and_publish(args):
+    """AI 生成内容 + 自动发布（一键流程）"""
+    from playwright.sync_api import sync_playwright
+    sys.path.insert(0, str(Path(__file__).parent))
+    from content_gen import generate_content, save_content
+
+    # 1. 生成内容
+    log.info(f'一键生成发布: 主题={args.topic}, 风格={args.style}')
+    try:
+        content_data = generate_content(
+            topic=args.topic,
+            style=args.style,
+            extra_instructions=args.extra or '',
+        )
+        path = save_content(content_data)
+        log.info(f'内容已生成: {content_data["title"]}')
+    except Exception as e:
+        print(json.dumps({'success': False, 'phase': 'generate', 'error': str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
+    title = content_data['title']
+    content = content_data['content']
+    tags = content_data.get('tags', [])
+
+    if args.dry_run:
+        print(json.dumps({
+            'success': True,
+            'dry_run': True,
+            'title': title,
+            'content': content,
+            'tags': tags,
+            'saved_to': path,
+        }, ensure_ascii=False, indent=2))
+        return
+
+    # 2. 发布
+    with sync_playwright() as pw:
+        ctx = create_browser_context(pw, headless=args.headless)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+        if not check_login(page):
+            print(json.dumps({'success': False, 'error': '未登录，请先执行 login 命令'}, ensure_ascii=False))
+            ctx.close()
+            sys.exit(1)
+
+        result = publish_note(
+            page,
+            title=title,
+            content=content,
+            tags=tags,
+            dry_run=False,
+            auto_image=not args.no_auto_image,
+            image_count=args.image_count,
+        )
+        result['generated_content'] = path
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        ctx.close()
+        sys.exit(0 if result['success'] else 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description='小红书自动化发布工具')
     sub = parser.add_subparsers(dest='command', help='可用命令')
@@ -569,9 +1078,73 @@ def main():
     p_pub.add_argument('--dry-run', action='store_true', help='试运行，不实际发布')
     p_pub.add_argument('--headless', action='store_true', help='无头模式运行')
     p_pub.add_argument('--no-auto-image', action='store_true', help='禁用自动 AI 配图')
+    p_pub.add_argument('--image-count', type=int, default=1, help='自动生成图片数量（1-9，默认1）')
 
     # status
     p_status = sub.add_parser('status', help='检查登录状态')
+
+    # generate - AI 生成内容
+    p_gen = sub.add_parser('generate', help='AI 生成小红书内容')
+    p_gen.add_argument('--topic', '-t', help='主题/关键词')
+    p_gen.add_argument('--style', '-s', default='default',
+                       help='文案风格: default/review/tutorial/daily')
+    p_gen.add_argument('--extra', '-e', help='额外指令')
+    p_gen.add_argument('--list-styles', action='store_true', help='列出可用风格')
+
+    # auto - 一键生成+发布
+    p_auto = sub.add_parser('auto', help='AI 生成内容并自动发布')
+    p_auto.add_argument('--topic', '-t', required=True, help='主题/关键词')
+    p_auto.add_argument('--style', '-s', default='default',
+                        help='文案风格: default/review/tutorial/daily')
+    p_auto.add_argument('--extra', '-e', help='额外指令')
+    p_auto.add_argument('--dry-run', action='store_true', help='只生成不发布')
+    p_auto.add_argument('--headless', action='store_true', help='无头模式')
+    p_auto.add_argument('--no-auto-image', action='store_true', help='禁用自动配图')
+    p_auto.add_argument('--image-count', type=int, default=3, help='自动生成图片数量（1-9，默认3）')
+
+    # schedule - 定时发布管理
+    p_sched = sub.add_parser('schedule', help='定时发布管理')
+    p_sched.add_argument('schedule_action',
+                         choices=['list', 'add', 'remove', 'enable', 'disable', 'link'],
+                         help='操作: list/add/remove/enable/disable/link')
+    p_sched.add_argument('--topic', '-t', help='发布主题')
+    p_sched.add_argument('--style', '-s', default='default', help='文案风格')
+    p_sched.add_argument('--extra', '-e', help='额外指令')
+    p_sched.add_argument('--cron', dest='cron_expr', help='cron 表达式 (如 "0 8 * * *")')
+    p_sched.add_argument('--at', dest='at_time', help='一次性发布时间 ISO 格式 (如 "2026-02-13T10:00:00")')
+    p_sched.add_argument('--every', dest='every_minutes', help='每隔 N 分钟发布')
+    p_sched.add_argument('--tz', default='Asia/Shanghai', help='时区 (默认 Asia/Shanghai)')
+    p_sched.add_argument('--name', help='任务名称')
+    p_sched.add_argument('--task-id', dest='task_id', help='任务 ID')
+    p_sched.add_argument('--cron-job-id', dest='cron_job_id', help='OpenClaw cron job ID (link 操作用)')
+
+    # trending - 热点数据采集
+    p_trend = sub.add_parser('trending', help='热点数据采集')
+    p_trend.add_argument('trending_action', choices=['fetch', 'topics', 'sources'],
+                         help='操作: fetch=采集热榜, topics=提取话题, sources=列出数据源')
+    p_trend.add_argument('--source', '-s', action='append', dest='sources',
+                         help='数据源 (可多次指定): baidu/toutiao/bilibili')
+    p_trend.add_argument('--limit', '-n', type=int, default=20, help='每源返回条数 (默认20)')
+    p_trend.add_argument('--no-cache', action='store_true', help='跳过缓存')
+    p_trend.add_argument('--text', action='store_true', help='输出可读文本（默认 JSON）')
+
+    # hot - 根据热点一键生成内容
+    p_hot = sub.add_parser('hot', help='根据热点话题生成内容')
+    p_hot.add_argument('--pick', '-p', type=int, help='选择第 N 个热点（从1开始）')
+    p_hot.add_argument('--keyword', '-k', help='按关键词匹配热点')
+    p_hot.add_argument('--style', '-s', default='default', help='文案风格')
+    p_hot.add_argument('--extra', '-e', help='额外指令')
+    p_hot.add_argument('--publish', action='store_true', help='生成后直接发布')
+    p_hot.add_argument('--dry-run', action='store_true', help='试运行')
+    p_hot.add_argument('--headless', action='store_true', help='无头模式')
+    p_hot.add_argument('--image-count', type=int, default=3, help='自动生成图片数量（1-9，默认3）')
+
+    # keystore - API Key 加密管理
+    p_key = sub.add_parser('keystore', help='API Key 加密管理')
+    p_key.add_argument('key_action', choices=['status', 'migrate', 'list', 'set', 'get'],
+                       help='操作: status/migrate/list/set/get')
+    p_key.add_argument('--key-name', help='Key 名称')
+    p_key.add_argument('--key-value', help='Key 值（set 操作用）')
 
     args = parser.parse_args()
 
@@ -581,6 +1154,18 @@ def main():
         cmd_publish(args)
     elif args.command == 'status':
         cmd_status(args)
+    elif args.command == 'generate':
+        cmd_generate(args)
+    elif args.command == 'auto':
+        cmd_generate_and_publish(args)
+    elif args.command == 'schedule':
+        cmd_schedule(args)
+    elif args.command == 'trending':
+        cmd_trending(args)
+    elif args.command == 'hot':
+        cmd_hot(args)
+    elif args.command == 'keystore':
+        cmd_keystore(args)
     else:
         parser.print_help()
         sys.exit(1)
