@@ -1,0 +1,15 @@
+# 运行时生成的目录
+browser_data/
+content/
+screenshots/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# OS
+.DS_Store
+Thumbs.db
