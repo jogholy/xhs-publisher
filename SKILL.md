@@ -18,6 +18,94 @@ playwright install chromium
 
 所有命令通过 `scripts/xhs_auto.py` 执行，路径相对于本技能目录。
 
+## 🆕 新功能
+
+### 封面模板系统
+
+当 AI 配图生成失败时，自动 fallback 到本地封面模板。支持 8 种风格：
+
+```bash
+# 使用指定模板生成封面
+python3 scripts/xhs_auto.py publish --title "标题" --content "正文" --cover-template gradient
+
+# 随机选择模板
+python3 scripts/xhs_auto.py auto --topic "主题" --cover-template random
+```
+
+可用模板：
+- `minimal` — 简约风格（纯色背景 + 简洁线条）
+- `gradient` — 渐变风格（渐变背景 + 装饰圆形）
+- `magazine` — 杂志风格（深色背景 + 红色装饰）
+- `education` — 教育风格（边框 + 彩色圆点）
+- `tech` — 科技风格（深色渐变 + 蓝绿装饰）
+- `food` — 美食风格（暖色渐变 + 彩色圆形）
+- `travel` — 旅行风格（天空渐变 + 太阳云朵）
+- `business` — 商务风格（深色背景 + 蓝色线条）
+- `random` — 随机选择
+
+也可独立使用封面模板：
+
+```bash
+python3 scripts/cover_templates.py --title "标题" --subtitle "副标题" --template gradient --output cover.png
+python3 scripts/cover_templates.py --list  # 列出所有模板
+```
+
+### LLM 分页输出
+
+LLM 现在直接输出分页内容，避免长文本截断问题：
+
+- `content` 字段：编辑器简短引导文（50字内）
+- `content_pages` 数组：每页完整内容，直接用于生成文字图片
+- 兼容旧格式：没有 `content_pages` 时走原有截断逻辑
+
+生成的内容结构：
+```json
+{
+  "title": "标题",
+  "content": "👉 完整内容见图片，左滑查看全文",
+  "content_pages": ["第1页完整内容", "第2页完整内容", "第3页完整内容"],
+  "tags": ["标签1", "标签2"],
+  "call_to_action": "互动引导语"
+}
+```
+
+### 多账号管理
+
+支持管理多个小红书账号，每个账号独立的浏览器数据目录：
+
+```bash
+# 添加账号
+python3 scripts/xhs_auto.py account add work_account "工作账号"
+python3 scripts/xhs_auto.py account add personal_account "个人账号"
+
+# 列出所有账号
+python3 scripts/xhs_auto.py account list
+
+# 切换当前账号
+python3 scripts/xhs_auto.py account switch work_account
+
+# 查看当前账号
+python3 scripts/xhs_auto.py account current
+
+# 删除账号（可选保留数据）
+python3 scripts/xhs_auto.py account remove work_account --keep-data
+```
+
+所有命令都支持 `--account` 参数指定账号：
+
+```bash
+# 用指定账号登录
+python3 scripts/xhs_auto.py login --account work_account
+
+# 用指定账号发布
+python3 scripts/xhs_auto.py publish --title "标题" --content "正文" --account personal_account
+
+# 检查指定账号状态
+python3 scripts/xhs_auto.py status --account work_account
+```
+
+账号数据存储在 `data/accounts.json`，浏览器数据分别存储在 `browser_data/{account_id}/`。
+
 ### 0. AI 生成内容（新功能）
 
 #### 列出可用文案风格

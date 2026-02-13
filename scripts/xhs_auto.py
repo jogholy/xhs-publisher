@@ -245,7 +245,6 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
         image_paths = [str(default_cover)]
 
     # 溢出文本 → 文字排版图片（追加到配图后面）
-    overflow_text = getattr(args, 'overflow_text', '') or content_data.get('overflow_text', '')
     if overflow_text and overflow_text.strip():
         try:
             from image_gen import render_text_pages

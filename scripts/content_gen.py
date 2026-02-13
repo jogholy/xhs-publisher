@@ -210,6 +210,9 @@ def extract_json(text):
     text = re.sub(r'^```(?:json)?\s*\n?', '', text.strip())
     text = re.sub(r'\n?```\s*$', '', text.strip())
 
+    # 清理控制字符（保留 \n \r \t）
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+
     # 尝试直接解析
     try:
         return json.loads(text)
