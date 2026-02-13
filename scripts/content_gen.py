@@ -296,20 +296,35 @@ def generate_content(topic, style='default', extra_instructions=''):
     if output['content'] and not output['content'].rstrip().endswith('AI辅助创作'):
         output['content'] = output['content'].rstrip() + '\n\n📝 本文由 AI 辅助创作'
 
-    # 正文硬截断（含声明后不超过1000字）
-    if len(output['content']) > 980:
-        # 在950字内找最后一个段落结尾截断
-        c = output['content'][:950]
-        last_para = c.rfind('\n\n')
-        if last_para > 600:
-            c = c[:last_para]
+    # 正文超长处理：拆分为编辑器文本 + 溢出文本（溢出部分将生成文字图片）
+    full_content = output['content']
+    MAX_EDITOR = 950  # 编辑器安全上限（留余量给声明）
+
+    if len(full_content) > MAX_EDITOR:
+        # 在 MAX_EDITOR 字内找段落边界截断
+        cut = full_content[:MAX_EDITOR]
+        last_para = cut.rfind('\n\n')
+        if last_para > 500:
+            cut_pos = last_para
         else:
-            last_nl = c.rfind('\n')
-            if last_nl > 600:
-                c = c[:last_nl]
-        # 重新追加声明
-        output['content'] = c.rstrip() + '\n\n📝 本文由 AI 辅助创作'
-        print(f"[内容生成] 正文超长已截断至 {len(output['content'])} 字", file=sys.stderr)
+            last_nl = cut.rfind('\n')
+            cut_pos = last_nl if last_nl > 500 else MAX_EDITOR
+
+        editor_text = full_content[:cut_pos].rstrip()
+        overflow_text = full_content[cut_pos:].strip()
+
+        # 编辑器文本末尾加"👉 更多内容见图片"引导 + 声明
+        if not editor_text.endswith('AI辅助创作'):
+            editor_text = editor_text + '\n\n👉 更多内容见图片\n\n📝 本文由 AI 辅助创作'
+
+        # 溢出文本去掉重复的声明（会在图片水印里体现）
+        overflow_text = overflow_text.replace('📝 本文由 AI 辅助创作', '').strip()
+
+        output['content'] = editor_text
+        output['overflow_text'] = overflow_text
+        print(f"[内容生成] 正文超长: 编辑器 {len(editor_text)} 字 + 溢出 {len(overflow_text)} 字（将生成文字图片）", file=sys.stderr)
+    else:
+        output['overflow_text'] = ''
 
     return output
 

@@ -154,7 +154,7 @@ def do_login(page, timeout=300):
     raise TimeoutError(f'登录超时（{timeout}秒），请重试')
 
 
-def publish_note(page, title, content, tags=None, images=None, dry_run=False, auto_image=True, image_count=1):
+def publish_note(page, title, content, tags=None, images=None, dry_run=False, auto_image=True, image_count=1, overflow_text=''):
     """
     发布小红书笔记（含错误恢复）
 
@@ -167,6 +167,7 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
         dry_run: 试运行，不实际点击发布
         auto_image: 没有图片时是否自动用 AI 生成配图（默认 True）
         image_count: 自动生成图片数量（1-9，默认 1，仅在 auto_image 且无 images 时生效）
+        overflow_text: 溢出文本（超过编辑器限制的部分，将生成文字排版图片）
     """
     sys.path.insert(0, str(Path(__file__).parent))
     from recovery import safe_navigate, save_error_snapshot, check_page_health, recover_page
@@ -236,6 +237,24 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
         if not default_cover.exists():
             _generate_default_cover(default_cover, title)
         image_paths = [str(default_cover)]
+
+    # 溢出文本 → 文字排版图片（追加到配图后面）
+    if overflow_text and overflow_text.strip():
+        try:
+            from image_gen import render_text_pages
+            text_pages = render_text_pages(overflow_text, CONTENT_DIR, prefix='text_page')
+            if text_pages:
+                # 小红书最多9张图，留位置给文字页
+                max_total = 9
+                if len(image_paths) + len(text_pages) > max_total:
+                    # 压缩 AI 配图数量，优先保证文字页
+                    keep_ai = max(1, max_total - len(text_pages))
+                    image_paths = image_paths[:keep_ai]
+                    log.info(f'图片总数超限，AI配图保留 {keep_ai} 张')
+                image_paths.extend(text_pages)
+                log.info(f'溢出文本已生成 {len(text_pages)} 张文字图片，总计 {len(image_paths)} 张')
+        except Exception as e:
+            log.warning(f'溢出文本图片生成失败（不影响发布）: {e}')
 
     try:
         upload_input = page.locator('input[type="file"]').first
@@ -1002,6 +1021,7 @@ def cmd_hot(args):
         title = result['title']
         content = result['content']
         tags = result.get('tags', [])
+        overflow_text = result.get('overflow_text', '')
 
         with sync_playwright() as pw:
             ctx = create_browser_context(pw, headless=args.headless)
@@ -1016,6 +1036,7 @@ def cmd_hot(args):
                 page, title=title, content=content, tags=tags,
                 dry_run=args.dry_run, auto_image=True,
                 image_count=args.image_count,
+                overflow_text=overflow_text,
             )
             pub_result['generated_content'] = path
             pub_result['hot_topic'] = chosen
@@ -1345,6 +1366,7 @@ def cmd_generate_and_publish(args):
     title = content_data['title']
     content = content_data['content']
     tags = content_data.get('tags', [])
+    overflow_text = content_data.get('overflow_text', '')
 
     if args.dry_run:
         print(json.dumps({
@@ -1375,6 +1397,7 @@ def cmd_generate_and_publish(args):
             dry_run=False,
             auto_image=not args.no_auto_image,
             image_count=args.image_count,
+            overflow_text=overflow_text,
         )
         result['generated_content'] = path
         print(json.dumps(result, ensure_ascii=False, indent=2))

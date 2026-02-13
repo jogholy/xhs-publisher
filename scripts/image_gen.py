@@ -308,6 +308,206 @@ def _run_qwen_image(prompt, output_path, api_key):
         }
 
 
+# ─── 文字排版图片（正文溢出时使用） ────────────────────────────
+
+def render_text_pages(text, output_dir, prefix='text_page',
+                      width=1080, height=1440,
+                      bg_color='#FFF5F0', text_color='#2D2D2D',
+                      font_size=36, line_spacing=1.6,
+                      padding=(100, 80, 100, 80)):
+    """
+    将长文本排版成多张图片（纯色底 + 文字），用于小红书正文溢出时的图片展示。
+
+    Args:
+        text: 要排版的文本
+        output_dir: 输出目录
+        prefix: 文件名前缀
+        width/height: 图片尺寸（默认 3:4 竖版，适合小红书）
+        bg_color: 背景色（默认暖白）
+        text_color: 文字颜色
+        font_size: 字号
+        line_spacing: 行距倍数
+        padding: (上, 右, 下, 左) 内边距
+
+    Returns:
+        list[str]: 生成的图片路径列表
+    """
+    from datetime import datetime
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 加载字体
+    font = None
+    font_paths = [
+        '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+    ]
+    for fp in font_paths:
+        if os.path.exists(fp):
+            try:
+                font = ImageFont.truetype(fp, font_size)
+                break
+            except Exception:
+                continue
+    if not font:
+        font = ImageFont.load_default()
+
+    # 加载粗体字体（用于小标题）
+    bold_font = None
+    bold_paths = [
+        '/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc',
+    ]
+    for fp in bold_paths:
+        if os.path.exists(fp):
+            try:
+                bold_font = ImageFont.truetype(fp, font_size + 2)
+                break
+            except Exception:
+                continue
+    if not bold_font:
+        bold_font = font
+
+    pad_top, pad_right, pad_bottom, pad_left = padding
+    content_width = width - pad_left - pad_right
+    content_height = height - pad_top - pad_bottom
+    line_height = int(font_size * line_spacing)
+
+    # 文本自动换行
+    def wrap_text(txt, fnt):
+        """将一行文本按宽度自动换行"""
+        lines = []
+        for raw_line in txt.split('\n'):
+            if not raw_line.strip():
+                lines.append('')
+                continue
+            current = ''
+            for char in raw_line:
+                test = current + char
+                bbox = fnt.getbbox(test) if hasattr(fnt, 'getbbox') else (0, 0, len(test) * font_size, font_size)
+                tw = bbox[2] - bbox[0]
+                if tw > content_width:
+                    lines.append(current)
+                    current = char
+                else:
+                    current = test
+            if current:
+                lines.append(current)
+        return lines
+
+    # 判断是否是小标题行（以 emoji 或数字序号开头，或全大写短行）
+    def is_heading(line):
+        s = line.strip()
+        if not s:
+            return False
+        # 数字序号开头：1. 2. ① ② 一、二、
+        if len(s) < 40 and (s[0].isdigit() or s[0] in '①②③④⑤⑥⑦⑧⑨⑩'):
+            return True
+        # 中文序号
+        if len(s) < 40 and s[0] in '一二三四五六七八九十':
+            return True
+        # 【】标题
+        if s.startswith('【') and '】' in s[:20]:
+            return True
+        return False
+
+    # 将所有文本换行并分页
+    all_lines = wrap_text(text, font)
+    pages = []
+    current_page_lines = []
+    current_y = 0
+
+    for line in all_lines:
+        needed = line_height + (8 if is_heading(line) and current_page_lines else 0)
+        if current_y + needed > content_height and current_page_lines:
+            pages.append(current_page_lines)
+            current_page_lines = []
+            current_y = 0
+        if is_heading(line) and current_page_lines:
+            current_y += 8  # 小标题前额外间距
+        current_page_lines.append(line)
+        current_y += line_height
+
+    if current_page_lines:
+        pages.append(current_page_lines)
+
+    # 渲染每页
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_paths = []
+
+    for i, page_lines in enumerate(pages):
+        img = Image.new('RGB', (width, height), bg_color)
+        draw = ImageDraw.Draw(img)
+
+        # 页码（右上角）
+        page_text = f'{i + 1}/{len(pages)}'
+        page_font_size = max(font_size - 8, 20)
+        try:
+            page_font = ImageFont.truetype(font_paths[0] if os.path.exists(font_paths[0]) else font_paths[-1], page_font_size)
+        except Exception:
+            page_font = font
+        pbbox = draw.textbbox((0, 0), page_text, font=page_font)
+        draw.text(
+            (width - pad_right - (pbbox[2] - pbbox[0]), pad_top // 2 - (pbbox[3] - pbbox[1]) // 2),
+            page_text, fill='#AAAAAA', font=page_font
+        )
+
+        # 渲染文本行
+        y = pad_top
+        for line in page_lines:
+            if is_heading(line):
+                y += 4
+                draw.text((pad_left, y), line, fill=text_color, font=bold_font)
+            else:
+                draw.text((pad_left, y), line, fill=text_color, font=font)
+            y += line_height
+
+        # 底部装饰线
+        line_y = height - pad_bottom + 20
+        draw.line([(pad_left, line_y), (width - pad_right, line_y)], fill='#E0D5CF', width=1)
+
+        # AI 水印
+        _add_ai_watermark_to_draw(draw, img.size, font_paths)
+
+        out_path = str(output_dir / f'{prefix}_{ts}_{i + 1}.png')
+        img.save(out_path, quality=95)
+        output_paths.append(out_path)
+
+    print(f'[图片生成] 文字排版完成: {len(output_paths)} 页', file=sys.stderr)
+    return output_paths
+
+
+def _add_ai_watermark_to_draw(draw, img_size, font_paths):
+    """在 ImageDraw 上直接绘制 AI 水印（用于文字排版图片，避免重复打开文件）"""
+    w, h = img_size
+    min_side = min(w, h)
+    wm_font_size = max(int(min_side * 0.035), 14)
+
+    wm_font = None
+    for fp in font_paths:
+        if os.path.exists(fp):
+            try:
+                wm_font = ImageFont.truetype(fp, wm_font_size)
+                break
+            except Exception:
+                continue
+
+    text = 'AI生成'
+    bbox = draw.textbbox((0, 0), text, font=wm_font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    margin = 10
+    x, y = w - tw - margin, h - th - margin
+    bg_padding = 3
+    draw.rectangle(
+        [x - bg_padding, y - bg_padding, x + tw + bg_padding, y + th + bg_padding],
+        fill=(0, 0, 0, 80)
+    )
+    draw.text((x, y), text, fill=(255, 255, 255, 200), font=wm_font)
+
+
 # ─── CLI ────────────────────────────────────────────────────
 
 def main():
