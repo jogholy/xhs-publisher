@@ -242,17 +242,17 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
     if overflow_text and overflow_text.strip():
         try:
             from image_gen import render_text_pages
-            text_pages = render_text_pages(overflow_text, CONTENT_DIR, prefix='text_page')
+            # 超长模式：封面1张 + 文字页最多8张
+            max_text_pages = 9 - min(len(image_paths), 1)  # 至少保留1张封面
+            text_pages = render_text_pages(
+                overflow_text, CONTENT_DIR, prefix='text_page',
+                title=title, max_pages=max_text_pages,
+            )
             if text_pages:
-                # 小红书最多9张图，留位置给文字页
-                max_total = 9
-                if len(image_paths) + len(text_pages) > max_total:
-                    # 压缩 AI 配图数量，优先保证文字页
-                    keep_ai = max(1, max_total - len(text_pages))
-                    image_paths = image_paths[:keep_ai]
-                    log.info(f'图片总数超限，AI配图保留 {keep_ai} 张')
+                # 只保留1张AI封面，剩下全给文字页
+                image_paths = image_paths[:1]
                 image_paths.extend(text_pages)
-                log.info(f'溢出文本已生成 {len(text_pages)} 张文字图片，总计 {len(image_paths)} 张')
+                log.info(f'全文转图片: 封面1张 + 文字{len(text_pages)}页，共{len(image_paths)}张')
         except Exception as e:
             log.warning(f'溢出文本图片生成失败（不影响发布）: {e}')
 

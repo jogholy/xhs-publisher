@@ -314,7 +314,8 @@ def render_text_pages(text, output_dir, prefix='text_page',
                       width=1080, height=1440,
                       bg_color='#FFF5F0', text_color='#2D2D2D',
                       font_size=36, line_spacing=1.6,
-                      padding=(100, 80, 100, 80)):
+                      padding=(100, 80, 100, 80),
+                      title=None, max_pages=8):
     """
     将长文本排版成多张图片（纯色底 + 文字），用于小红书正文溢出时的图片展示。
 
@@ -328,6 +329,8 @@ def render_text_pages(text, output_dir, prefix='text_page',
         font_size: 字号
         line_spacing: 行距倍数
         padding: (上, 右, 下, 左) 内边距
+        title: 标题（如果提供，会在第一页顶部显示大标题）
+        max_pages: 最大页数（默认8，配合1张封面刚好9张）
 
     Returns:
         list[str]: 生成的图片路径列表
@@ -434,16 +437,38 @@ def render_text_pages(text, output_dir, prefix='text_page',
     if current_page_lines:
         pages.append(current_page_lines)
 
+    # 限制最大页数
+    if len(pages) > max_pages:
+        pages = pages[:max_pages]
+        # 最后一页末尾加省略提示
+        pages[-1].append('')
+        pages[-1].append('...(更多内容请关注后续更新)')
+
+    # 加载标题字体（比正文大）
+    title_font = None
+    if title:
+        title_font_size = font_size + 12
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    title_font = ImageFont.truetype(fp, title_font_size)
+                    break
+                except Exception:
+                    continue
+        if not title_font:
+            title_font = bold_font
+
     # 渲染每页
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_paths = []
 
+    total_pages = len(pages)
     for i, page_lines in enumerate(pages):
         img = Image.new('RGB', (width, height), bg_color)
         draw = ImageDraw.Draw(img)
 
         # 页码（右上角）
-        page_text = f'{i + 1}/{len(pages)}'
+        page_text = f'{i + 1}/{total_pages}'
         page_font_size = max(font_size - 8, 20)
         try:
             page_font = ImageFont.truetype(font_paths[0] if os.path.exists(font_paths[0]) else font_paths[-1], page_font_size)
@@ -457,6 +482,19 @@ def render_text_pages(text, output_dir, prefix='text_page',
 
         # 渲染文本行
         y = pad_top
+
+        # 第一页显示标题
+        if i == 0 and title and title_font:
+            # 标题自动换行
+            title_lines = wrap_text(title, title_font)
+            for tl in title_lines:
+                draw.text((pad_left, y), tl, fill='#1A1A1A', font=title_font)
+                y += int((font_size + 12) * line_spacing)
+            # 标题下方加分隔线
+            y += 8
+            draw.line([(pad_left, y), (width - pad_right, y)], fill='#E0D5CF', width=2)
+            y += 20
+
         for line in page_lines:
             if is_heading(line):
                 y += 4

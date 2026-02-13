@@ -253,6 +253,8 @@ def generate_content(topic, style='default', extra_instructions=''):
         raise RuntimeError(f"模板加载失败: {style}")
 
     system_prompt = template.get('system', '你是一位资深小红书内容创作者。')
+    # 通用约束：不要贴代码
+    system_prompt += '\n\n重要约束：正文中绝对不要出现任何代码片段、代码块或技术命令。讲方法、讲思路即可，用通俗易懂的语言解释，面向普通读者而非程序员。'
     user_prompt = template['user_template'].replace('{topic}', topic)
 
     if extra_instructions:
@@ -292,38 +294,25 @@ def generate_content(topic, style='default', extra_instructions=''):
         output['title'] = t
         print(f"[内容生成] 标题超长已截断: {output['title']}", file=sys.stderr)
 
-    # 合规：正文末尾追加 AI 辅助创作声明
-    if output['content'] and not output['content'].rstrip().endswith('AI辅助创作'):
-        output['content'] = output['content'].rstrip() + '\n\n📝 本文由 AI 辅助创作'
-
-    # 正文超长处理：拆分为编辑器文本 + 溢出文本（溢出部分将生成文字图片）
+    # 正文超长处理：超过编辑器限制时，全部内容做成文字图片
     full_content = output['content']
-    MAX_EDITOR = 950  # 编辑器安全上限（留余量给声明）
+    MAX_EDITOR = 950  # 编辑器安全上限
 
     if len(full_content) > MAX_EDITOR:
-        # 在 MAX_EDITOR 字内找段落边界截断
-        cut = full_content[:MAX_EDITOR]
-        last_para = cut.rfind('\n\n')
-        if last_para > 500:
-            cut_pos = last_para
-        else:
-            last_nl = cut.rfind('\n')
-            cut_pos = last_nl if last_nl > 500 else MAX_EDITOR
-
-        editor_text = full_content[:cut_pos].rstrip()
-        overflow_text = full_content[cut_pos:].strip()
-
-        # 编辑器文本末尾加"👉 更多内容见图片"引导 + 声明
-        if not editor_text.endswith('AI辅助创作'):
-            editor_text = editor_text + '\n\n👉 更多内容见图片\n\n📝 本文由 AI 辅助创作'
-
-        # 溢出文本去掉重复的声明（会在图片水印里体现）
+        # 全部内容转为图片文本，编辑器只放引导语
+        overflow_text = full_content.rstrip()
+        # 去掉可能已有的声明（图片水印会体现）
         overflow_text = overflow_text.replace('📝 本文由 AI 辅助创作', '').strip()
+
+        editor_text = '👉 完整内容见图片，左滑查看全文\n\n📝 本文由 AI 辅助创作'
 
         output['content'] = editor_text
         output['overflow_text'] = overflow_text
-        print(f"[内容生成] 正文超长: 编辑器 {len(editor_text)} 字 + 溢出 {len(overflow_text)} 字（将生成文字图片）", file=sys.stderr)
+        print(f"[内容生成] 正文超长({len(full_content)}字): 全部转为文字图片", file=sys.stderr)
     else:
+        # 正常长度，追加 AI 声明
+        if full_content and not full_content.rstrip().endswith('AI辅助创作'):
+            output['content'] = full_content.rstrip() + '\n\n📝 本文由 AI 辅助创作'
         output['overflow_text'] = ''
 
     return output
