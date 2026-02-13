@@ -144,19 +144,26 @@ def _add_ai_watermark(image_path):
         print(f'[图片生成] AI 水印添加失败（不影响发布）: {e}', file=sys.stderr)
 
 
-def generate_image(prompt, output_path, resolution='1K'):
+def generate_image(prompt, output_path, resolution='1K', cover_template=None, title=None):
     """
-    生成图片，优先 nano-banana-pro，降级 qwen-image
+    生成图片，优先 nano-banana-pro，降级 qwen-image，最后 fallback 到封面模板
 
     Args:
         prompt: 图片描述
         output_path: 输出文件路径
         resolution: 分辨率 1K/2K/4K（仅 nano-banana-pro 支持）
+        cover_template: 封面模板名称，如果指定则直接使用模板
+        title: 标题（用于模板封面）
 
     Returns:
         dict: {'success': bool, 'path': str, 'engine': str, 'error': str}
     """
     output_path = str(output_path)
+
+    # 如果指定了封面模板，直接使用模板生成
+    if cover_template:
+        print(f'[图片生成] 使用封面模板: {cover_template}', file=sys.stderr)
+        return _generate_template_cover(title or prompt, output_path, cover_template)
 
     # 尝试 nano-banana-pro
     gemini_key = _get_gemini_key()
@@ -182,12 +189,37 @@ def generate_image(prompt, output_path, resolution='1K'):
             return result
         print(f'[图片生成] qwen-image 也失败: {result.get("error", "未知错误")}', file=sys.stderr)
 
-    return {
-        'success': False,
-        'path': '',
-        'engine': 'none',
-        'error': '所有图片生成引擎均不可用'
-    }
+    # 最后 fallback 到封面模板
+    print(f'[图片生成] AI 生成失败，fallback 到封面模板', file=sys.stderr)
+    return _generate_template_cover(title or prompt, output_path, 'random')
+
+
+def _generate_template_cover(title, output_path, template_name='random'):
+    """使用封面模板生成图片"""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from cover_templates import generate_cover
+        
+        result = generate_cover(
+            title=title[:20],  # 标题限制20字
+            subtitle="",
+            template_name=template_name,
+            output_path=output_path
+        )
+        
+        if result['success']:
+            result['engine'] = f"template-{result['template']}"
+            print(f'[图片生成] 封面模板生成成功: {result["template_name"]}', file=sys.stderr)
+        
+        return result
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'path': '',
+            'engine': 'template',
+            'error': f'封面模板生成失败: {str(e)}'
+        }
 
 
 def _run_nano_banana(prompt, output_path, resolution, api_key):

@@ -46,17 +46,22 @@ XHS_PUBLISH = 'https://creator.xiaohongshu.com/publish/publish'
 XHS_LOGIN = 'https://creator.xiaohongshu.com/login'
 
 
-def create_browser_context(playwright, headless=False):
+def create_browser_context(playwright, headless=False, account_id=None):
     """创建持久化浏览器上下文（含反检测）"""
     sys.path.insert(0, str(Path(__file__).parent))
     from stealth import random_user_agent, random_viewport, get_stealth_args, get_stealth_ignore_args, apply_stealth
+    from accounts import get_account_browser_dir
 
+    # 获取账号对应的浏览器数据目录
+    browser_data_dir = get_account_browser_dir(account_id)
+    
     ua = random_user_agent()
     vp = random_viewport()
     log.info(f'浏览器指纹: UA={ua[:50]}... viewport={vp["width"]}x{vp["height"]}')
+    log.info(f'使用浏览器数据目录: {browser_data_dir}')
 
     context = playwright.chromium.launch_persistent_context(
-        user_data_dir=str(BROWSER_DATA),
+        user_data_dir=browser_data_dir,
         headless=headless,
         viewport=vp,
         user_agent=ua,
@@ -154,7 +159,7 @@ def do_login(page, timeout=300):
     raise TimeoutError(f'登录超时（{timeout}秒），请重试')
 
 
-def publish_note(page, title, content, tags=None, images=None, dry_run=False, auto_image=True, image_count=1, overflow_text=''):
+def publish_note(page, title, content, tags=None, images=None, dry_run=False, auto_image=True, image_count=1, overflow_text='', cover_template=None):
     """
     发布小红书笔记（含错误恢复）
 
@@ -168,6 +173,7 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
         auto_image: 没有图片时是否自动用 AI 生成配图（默认 True）
         image_count: 自动生成图片数量（1-9，默认 1，仅在 auto_image 且无 images 时生效）
         overflow_text: 溢出文本（超过编辑器限制的部分，将生成文字排版图片）
+        cover_template: 封面模板名称（可选）
     """
     sys.path.insert(0, str(Path(__file__).parent))
     from recovery import safe_navigate, save_error_snapshot, check_page_health, recover_page
@@ -209,18 +215,18 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
     if not image_paths and auto_image:
         if image_count > 1:
             log.info(f'未提供图片，自动生成 {image_count} 张 AI 配图...')
-            generated = _auto_generate_multi_images(title, content, count=image_count)
+            generated = _auto_generate_multi_images(title, content, count=image_count, cover_template=cover_template)
             if generated:
                 image_paths = generated
                 log.info(f'多图生成完成: {len(generated)} 张')
             else:
                 log.warning('多图生成全部失败，尝试单张...')
-                single = _auto_generate_image(title, content)
+                single = _auto_generate_image(title, content, cover_template=cover_template)
                 if single:
                     image_paths = [single]
         else:
             log.info('未提供图片，自动生成 AI 配图...')
-            generated = _auto_generate_image(title, content)
+            generated = _auto_generate_image(title, content, cover_template=cover_template)
             if generated:
                 image_paths = [generated]
                 log.info(f'AI 配图生成成功: {generated}')
@@ -239,6 +245,7 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
         image_paths = [str(default_cover)]
 
     # 溢出文本 → 文字排版图片（追加到配图后面）
+    overflow_text = getattr(args, 'overflow_text', '') or content_data.get('overflow_text', '')
     if overflow_text and overflow_text.strip():
         try:
             from image_gen import render_text_pages
@@ -487,10 +494,10 @@ def _add_tags(page, tags):
     log.info(f'已添加 {added} 个标签')
 
 
-def _auto_generate_image(title, content):
+def _auto_generate_image(title, content, cover_template=None):
     """
     根据笔记标题和正文自动生成 AI 配图
-    优先 nano-banana-pro，降级 qwen-image
+    优先 nano-banana-pro，降级 qwen-image，最后 fallback 到封面模板
     返回图片路径或 None
     """
     try:
@@ -510,7 +517,7 @@ def _auto_generate_image(title, content):
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_path = str(CONTENT_DIR / f'ai_cover_{ts}.png')
 
-        result = generate_image(prompt, output_path, resolution='1K')
+        result = generate_image(prompt, output_path, resolution='1K', cover_template=cover_template, title=title)
         if result['success']:
             log.info(f'AI 配图生成成功 [引擎: {result["engine"]}]: {output_path}')
             return output_path
@@ -545,7 +552,7 @@ def _split_content_sections(content):
     return sections if sections else [content]
 
 
-def _auto_generate_multi_images(title, content, count=3):
+def _auto_generate_multi_images(title, content, count=3, cover_template=None):
     """
     根据笔记标题和正文自动生成多张 AI 配图。
     第 1 张为封面（3:4 竖版），后续为内容图（3:4 竖版）。
@@ -555,6 +562,7 @@ def _auto_generate_multi_images(title, content, count=3):
         title: 笔记标题
         content: 笔记正文
         count: 生成图片数量（1-9，默认 3）
+        cover_template: 封面模板名称（可选）
 
     Returns:
         list[str]: 生成成功的图片路径列表（可能少于 count）
@@ -599,7 +607,9 @@ def _auto_generate_multi_images(title, content, count=3):
         output_path = str(CONTENT_DIR / f'ai_{suffix}_{ts}.png')
         log.info(f'生成第 {idx+1}/{count} 张图片...')
         try:
-            result = generate_image(prompt, output_path, resolution='1K')
+            # 第一张使用封面模板（如果指定）
+            template = cover_template if idx == 0 else None
+            result = generate_image(prompt, output_path, resolution='1K', cover_template=template, title=title)
             if result['success']:
                 generated.append(output_path)
                 log.info(f'  ✓ 第 {idx+1} 张成功 [{result["engine"]}]: {output_path}')
@@ -700,8 +710,9 @@ def cmd_login(args):
     """登录命令"""
     from playwright.sync_api import sync_playwright
 
+    account_id = getattr(args, 'account', None)
     with sync_playwright() as pw:
-        ctx = create_browser_context(pw, headless=False)
+        ctx = create_browser_context(pw, headless=False, account_id=account_id)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         if check_login(page):
@@ -711,14 +722,16 @@ def cmd_login(args):
             print(json.dumps({
                 'success': True,
                 'status': 'already_logged_in',
-                'screenshot': str(screenshot)
+                'screenshot': str(screenshot),
+                'account': account_id
             }, ensure_ascii=False))
         else:
             qr_path = do_login(page, timeout=args.timeout)
             print(json.dumps({
                 'success': True,
                 'status': 'logged_in',
-                'qr_screenshot': qr_path
+                'qr_screenshot': qr_path,
+                'account': account_id
             }, ensure_ascii=False))
 
         ctx.close()
@@ -750,15 +763,17 @@ def cmd_publish(args):
         }, ensure_ascii=False))
         sys.exit(1)
 
+    account_id = getattr(args, 'account', None)
     with sync_playwright() as pw:
-        ctx = create_browser_context(pw, headless=args.headless)
+        ctx = create_browser_context(pw, headless=args.headless, account_id=account_id)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         # 检查登录
         if not check_login(page):
             print(json.dumps({
                 'success': False,
-                'error': '未登录，请先执行 login 命令'
+                'error': '未登录，请先执行 login 命令',
+                'account': account_id
             }, ensure_ascii=False))
             ctx.close()
             sys.exit(1)
@@ -772,8 +787,10 @@ def cmd_publish(args):
             images=images,
             dry_run=args.dry_run,
             auto_image=not args.no_auto_image,
-            image_count=args.image_count
+            image_count=args.image_count,
+            cover_template=getattr(args, 'cover_template', None)
         )
+        result['account'] = account_id
 
         print(json.dumps(result, ensure_ascii=False, indent=2))
         ctx.close()
@@ -784,14 +801,23 @@ def cmd_status(args):
     """检查登录状态"""
     from playwright.sync_api import sync_playwright
 
+    account_id = getattr(args, 'account', None)
     with sync_playwright() as pw:
-        ctx = create_browser_context(pw, headless=True)
+        ctx = create_browser_context(pw, headless=True, account_id=account_id)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         logged_in = check_login(page)
+        
+        # 获取浏览器数据目录信息
+        sys.path.insert(0, str(Path(__file__).parent))
+        from accounts import get_account_browser_dir
+        browser_dir = Path(get_account_browser_dir(account_id))
+        
         result = {
             'logged_in': logged_in,
-            'browser_data_exists': BROWSER_DATA.exists() and any(BROWSER_DATA.iterdir()),
+            'browser_data_exists': browser_dir.exists() and any(browser_dir.iterdir()),
+            'browser_data_dir': str(browser_dir),
+            'account': account_id,
             'checked_at': datetime.now().isoformat()
         }
 
@@ -1380,12 +1406,17 @@ def cmd_generate_and_publish(args):
         return
 
     # 2. 发布
+    account_id = getattr(args, 'account', None)
     with sync_playwright() as pw:
-        ctx = create_browser_context(pw, headless=args.headless)
+        ctx = create_browser_context(pw, headless=args.headless, account_id=account_id)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         if not check_login(page):
-            print(json.dumps({'success': False, 'error': '未登录，请先执行 login 命令'}, ensure_ascii=False))
+            print(json.dumps({
+                'success': False, 
+                'error': '未登录，请先执行 login 命令',
+                'account': account_id
+            }, ensure_ascii=False))
             ctx.close()
             sys.exit(1)
 
@@ -1398,12 +1429,57 @@ def cmd_generate_and_publish(args):
             auto_image=not args.no_auto_image,
             image_count=args.image_count,
             overflow_text=overflow_text,
+            cover_template=getattr(args, 'cover_template', None)
         )
         result['generated_content'] = path
+        result['account'] = account_id
         print(json.dumps(result, ensure_ascii=False, indent=2))
         ctx.close()
         sys.exit(0 if result['success'] else 1)
 
+
+def cmd_account(args):
+    """账号管理命令"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from accounts import add_account, list_accounts, switch_account, remove_account, get_current_account
+    
+    action = args.account_action
+    
+    if action == 'add':
+        if not args.account_id or not args.name:
+            print(json.dumps({'success': False, 'error': '必须提供 --account-id 和 --name'}, ensure_ascii=False))
+            sys.exit(1)
+        result = add_account(args.account_id, args.name)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0 if result['success'] else 1)
+    
+    elif action == 'list':
+        result = list_accounts()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    
+    elif action == 'switch':
+        if not args.account_id:
+            print(json.dumps({'success': False, 'error': '必须提供 --account-id'}, ensure_ascii=False))
+            sys.exit(1)
+        result = switch_account(args.account_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0 if result['success'] else 1)
+    
+    elif action == 'remove':
+        if not args.account_id:
+            print(json.dumps({'success': False, 'error': '必须提供 --account-id'}, ensure_ascii=False))
+            sys.exit(1)
+        result = remove_account(args.account_id, keep_data=getattr(args, 'keep_data', False))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0 if result['success'] else 1)
+    
+    elif action == 'current':
+        result = get_current_account()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    
+    else:
+        print(json.dumps({'success': False, 'error': f'未知操作: {action}'}, ensure_ascii=False))
+        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description='小红书自动化发布工具')
@@ -1412,6 +1488,7 @@ def main():
     # login
     p_login = sub.add_parser('login', help='扫码登录小红书')
     p_login.add_argument('--timeout', type=int, default=300, help='登录超时秒数（默认300）')
+    p_login.add_argument('--account', help='指定账号ID')
 
     # publish
     p_pub = sub.add_parser('publish', help='发布笔记')
@@ -1424,9 +1501,12 @@ def main():
     p_pub.add_argument('--headless', action='store_true', help='无头模式运行')
     p_pub.add_argument('--no-auto-image', action='store_true', help='禁用自动 AI 配图')
     p_pub.add_argument('--image-count', type=int, default=1, help='自动生成图片数量（1-9，默认1）')
+    p_pub.add_argument('--cover-template', help='封面模板名称（minimal/gradient/magazine/education/tech/food/travel/business/random）')
+    p_pub.add_argument('--account', help='指定账号ID')
 
     # status
     p_status = sub.add_parser('status', help='检查登录状态')
+    p_status.add_argument('--account', help='指定账号ID')
 
     # generate - AI 生成内容
     p_gen = sub.add_parser('generate', help='AI 生成小红书内容')
@@ -1446,6 +1526,16 @@ def main():
     p_auto.add_argument('--headless', action='store_true', help='无头模式')
     p_auto.add_argument('--no-auto-image', action='store_true', help='禁用自动配图')
     p_auto.add_argument('--image-count', type=int, default=3, help='自动生成图片数量（1-9，默认3）')
+    p_auto.add_argument('--cover-template', help='封面模板名称（minimal/gradient/magazine/education/tech/food/travel/business/random）')
+    p_auto.add_argument('--account', help='指定账号ID')
+
+    # account - 账号管理
+    p_account = sub.add_parser('account', help='多账号管理')
+    p_account.add_argument('account_action', choices=['add', 'list', 'switch', 'remove', 'current'],
+                          help='操作: add/list/switch/remove/current')
+    p_account.add_argument('--account-id', help='账号ID')
+    p_account.add_argument('--name', help='账号显示名称（add 操作用）')
+    p_account.add_argument('--keep-data', action='store_true', help='删除账号时保留浏览器数据（remove 操作用）')
 
     # schedule - 定时发布管理
     p_sched = sub.add_parser('schedule', help='定时发布管理')
@@ -1536,6 +1626,8 @@ def main():
         cmd_generate(args)
     elif args.command == 'auto':
         cmd_generate_and_publish(args)
+    elif args.command == 'account':
+        cmd_account(args)
     elif args.command == 'schedule':
         cmd_schedule(args)
     elif args.command == 'trending':

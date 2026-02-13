@@ -237,7 +237,7 @@ def generate_content(topic, style='default', extra_instructions=''):
         extra_instructions: 额外指令
 
     Returns:
-        dict: {title, content, tags, call_to_action, style, topic}
+        dict: {title, content, content_pages, tags, call_to_action, style, topic}
     """
     # 加载 LLM 配置
     llm_cfg = get_llm_config()
@@ -272,6 +272,7 @@ def generate_content(topic, style='default', extra_instructions=''):
     output = {
         'title': result.get('title', ''),
         'content': result.get('content', result.get('full_content', '')),
+        'content_pages': result.get('content_pages', []),
         'tags': result.get('tags', result.get('hashtags', [])),
         'call_to_action': result.get('call_to_action', ''),
         'style': template.get('id', style),
@@ -294,26 +295,46 @@ def generate_content(topic, style='default', extra_instructions=''):
         output['title'] = t
         print(f"[内容生成] 标题超长已截断: {output['title']}", file=sys.stderr)
 
-    # 正文超长处理：超过编辑器限制时，全部内容做成文字图片
-    full_content = output['content']
-    MAX_EDITOR = 950  # 编辑器安全上限
-
-    if len(full_content) > MAX_EDITOR:
-        # 全部内容转为图片文本，编辑器只放引导语
-        overflow_text = full_content.rstrip()
-        # 去掉可能已有的声明（图片水印会体现）
-        overflow_text = overflow_text.replace('📝 本文由 AI 辅助创作', '').strip()
-
-        editor_text = '👉 完整内容见图片，左滑查看全文\n\n📝 本文由 AI 辅助创作'
-
-        output['content'] = editor_text
-        output['overflow_text'] = overflow_text
-        print(f"[内容生成] 正文超长({len(full_content)}字): 全部转为文字图片", file=sys.stderr)
+    # 处理分页内容
+    if output['content_pages']:
+        # 新格式：LLM 直接输出分页内容
+        print(f"[内容生成] 使用 LLM 分页输出: {len(output['content_pages'])} 页", file=sys.stderr)
+        
+        # content 字段作为编辑器简短引导文，确保不超过50字
+        if len(output['content']) > 50:
+            output['content'] = output['content'][:47] + '...'
+        
+        # 将分页内容合并为 overflow_text，用于生成文字图片
+        full_content = '\n\n'.join(output['content_pages'])
+        output['overflow_text'] = full_content.rstrip()
+        
+        # 追加 AI 声明到编辑器文本
+        if not output['content'].rstrip().endswith('AI辅助创作'):
+            output['content'] = output['content'].rstrip() + '\n\n📝 本文由 AI 辅助创作'
+            
     else:
-        # 正常长度，追加 AI 声明
-        if full_content and not full_content.rstrip().endswith('AI辅助创作'):
-            output['content'] = full_content.rstrip() + '\n\n📝 本文由 AI 辅助创作'
-        output['overflow_text'] = ''
+        # 兼容旧格式：走现有的超长截断逻辑
+        print(f"[内容生成] 兼容旧格式，使用超长截断逻辑", file=sys.stderr)
+        
+        full_content = output['content']
+        MAX_EDITOR = 950  # 编辑器安全上限
+
+        if len(full_content) > MAX_EDITOR:
+            # 全部内容转为图片文本，编辑器只放引导语
+            overflow_text = full_content.rstrip()
+            # 去掉可能已有的声明（图片水印会体现）
+            overflow_text = overflow_text.replace('📝 本文由 AI 辅助创作', '').strip()
+
+            editor_text = '👉 完整内容见图片，左滑查看全文\n\n📝 本文由 AI 辅助创作'
+
+            output['content'] = editor_text
+            output['overflow_text'] = overflow_text
+            print(f"[内容生成] 正文超长({len(full_content)}字): 全部转为文字图片", file=sys.stderr)
+        else:
+            # 正常长度，追加 AI 声明
+            if full_content and not full_content.rstrip().endswith('AI辅助创作'):
+                output['content'] = full_content.rstrip() + '\n\n📝 本文由 AI 辅助创作'
+            output['overflow_text'] = ''
 
     return output
 
