@@ -253,8 +253,8 @@ def generate_content(topic, style='default', extra_instructions=''):
         raise RuntimeError(f"模板加载失败: {style}")
 
     system_prompt = template.get('system', '你是一位资深小红书内容创作者。')
-    # 通用约束：不要贴代码
-    system_prompt += '\n\n重要约束：正文中绝对不要出现任何代码片段、代码块或技术命令。讲方法、讲思路即可，用通俗易懂的语言解释，面向普通读者而非程序员。'
+    # 通用约束
+    system_prompt += '\n\n重要约束：\n1. 正文中绝对不要出现任何代码片段、代码块或技术命令。讲方法、讲思路即可，用通俗易懂的语言解释。\n2. 不要使用任何 Markdown 格式（如 #、##、**加粗**、*斜体*、- 列表符号等）。用 emoji 和换行来组织排版，符合小红书的阅读习惯。'
     user_prompt = template['user_template'].replace('{topic}', topic)
 
     if extra_instructions:

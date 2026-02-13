@@ -379,6 +379,32 @@ def render_text_pages(text, output_dir, prefix='text_page',
     content_height = height - pad_top - pad_bottom
     line_height = int(font_size * line_spacing)
 
+    # 清理 Markdown 格式符号
+    import re
+    def strip_markdown(txt):
+        """去除文本中的 Markdown 格式符号"""
+        lines = []
+        for line in txt.split('\n'):
+            # 去掉标题符号 #### ### ## #
+            line = re.sub(r'^#{1,6}\s*', '', line)
+            # 去掉加粗 **text** 或 __text__
+            line = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
+            line = re.sub(r'__(.+?)__', r'\1', line)
+            # 去掉斜体 *text* 或 _text_（但不影响 emoji 旁的 *）
+            line = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', line)
+            # 去掉行内代码 `text`
+            line = re.sub(r'`(.+?)`', r'\1', line)
+            # 去掉列表符号 - 或 * 开头（保留内容）
+            line = re.sub(r'^\s*[-*]\s+', '• ', line)
+            # 去掉有序列表多余格式
+            line = re.sub(r'^\s*(\d+)\.\s+', r'\1. ', line)
+            lines.append(line)
+        return '\n'.join(lines)
+
+    text = strip_markdown(text)
+    if title:
+        title = strip_markdown(title)
+
     # 文本自动换行
     def wrap_text(txt, fnt):
         """将一行文本按宽度自动换行"""
