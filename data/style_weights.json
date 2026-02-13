@@ -1,0 +1,10 @@
+{
+  "default": {"count": 0, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125},
+  "review": {"count": 0, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125},
+  "tutorial": {"count": 0, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125},
+  "daily": {"count": 0, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125},
+  "listicle": {"count": 1, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125},
+  "story": {"count": 0, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125},
+  "debate": {"count": 0, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125},
+  "comparison": {"count": 0, "total_likes": 0, "total_collects": 0, "total_comments": 0, "weight": 0.125}
+}

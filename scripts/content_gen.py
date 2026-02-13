@@ -32,26 +32,35 @@ def load_config():
 
 
 def get_llm_config():
-    """获取 LLM API 配置（优先加密存储的 Key，fallback 明文配置）"""
+    """获取 LLM API 配置（优先 Gemini 免费 API，降级百炼）"""
     cfg = load_config()
     providers = cfg.get('models', {}).get('providers', {})
 
-    # 尝试从加密存储获取 API Key
-    encrypted_key = None
+    # 优先用 Gemini（免费）
+    gemini_key = None
     try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        from keystore import get_api_key
-        encrypted_key = get_api_key('bailian_api_key')
-    except Exception:
+        gemini_key = cfg['skills']['entries']['nano-banana-pro']['apiKey']
+    except (KeyError, TypeError):
         pass
+    if not gemini_key:
+        gemini_key = os.environ.get('GEMINI_API_KEY', '')
 
-    # 优先用百炼（国内直连，快）
+    if gemini_key:
+        return {
+            'base_url': 'https://generativelanguage.googleapis.com/v1beta/openai',
+            'api_key': gemini_key,
+            'model': 'gemini-2.5-flash',
+            'api_type': 'openai-completions',
+            'proxy': 'http://127.0.0.1:7897',
+        }
+
+    # 降级百炼
     if 'bailian' in providers:
         p = providers['bailian']
         model_id = p.get('models', [{}])[0].get('id', 'qwen-plus') if p.get('models') else 'qwen-plus'
         return {
             'base_url': p.get('baseUrl', ''),
-            'api_key': encrypted_key or p.get('apiKey', ''),
+            'api_key': p.get('apiKey', ''),
             'model': model_id,
             'api_type': p.get('api', 'openai-completions'),
         }
@@ -108,7 +117,7 @@ def load_template(style):
 
 
 def call_llm(system_prompt, user_prompt, llm_cfg):
-    """调用 LLM API 生成内容"""
+    """调用 LLM API 生成内容（支持代理和速率限制重试）"""
     import urllib.request
     import urllib.error
 
@@ -116,9 +125,9 @@ def call_llm(system_prompt, user_prompt, llm_cfg):
     base_url = llm_cfg['base_url'].rstrip('/')
     api_key = llm_cfg['api_key']
     model = llm_cfg['model']
+    proxy = llm_cfg.get('proxy', '')
 
     if 'anthropic' in api_type:
-        # Anthropic Messages API
         url = f"{base_url}/v1/messages"
         headers = {
             'Content-Type': 'application/json',
@@ -132,7 +141,6 @@ def call_llm(system_prompt, user_prompt, llm_cfg):
             'messages': [{'role': 'user', 'content': user_prompt}],
         }
     else:
-        # OpenAI-compatible API
         url = f"{base_url}/chat/completions"
         headers = {
             'Content-Type': 'application/json',
@@ -145,18 +153,35 @@ def call_llm(system_prompt, user_prompt, llm_cfg):
                 {'role': 'user', 'content': user_prompt},
             ],
             'temperature': 0.8,
-            'max_tokens': 4096,
+            'max_tokens': 16384,
         }
 
     data = json.dumps(body).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
 
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode('utf-8', errors='replace')
-        raise RuntimeError(f"LLM API 错误 ({e.code}): {err_body}")
+    # 构建 opener（支持代理）
+    if proxy:
+        proxy_handler = urllib.request.ProxyHandler({'https': proxy, 'http': proxy})
+        opener = urllib.request.build_opener(proxy_handler)
+    else:
+        opener = urllib.request.build_opener()
+
+    # 重试逻辑（Gemini 免费 tier 有速率限制）
+    max_retries = 3
+    for attempt in range(max_retries):
+        req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+        try:
+            with opener.open(req, timeout=90) as resp:
+                result = json.loads(resp.read().decode('utf-8'))
+            break
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode('utf-8', errors='replace')
+            if e.code == 429 and attempt < max_retries - 1:
+                wait = (attempt + 1) * 15
+                print(f"[LLM] 速率限制，等待 {wait}s 后重试 ({attempt+1}/{max_retries})...", file=sys.stderr)
+                import time
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"LLM API 错误 ({e.code}): {err_body}")
 
     # 提取文本
     if 'anthropic' in api_type:
@@ -165,6 +190,18 @@ def call_llm(system_prompt, user_prompt, llm_cfg):
         text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
 
     return text
+
+
+def _call_llm(prompt, max_tokens=4096):
+    """简易 LLM 调用（供 comments.py 等模块使用）"""
+    llm_cfg = get_llm_config()
+    if not llm_cfg:
+        raise RuntimeError("未找到可用的 LLM 配置")
+    # 临时覆盖 max_tokens
+    orig_call = call_llm
+    import copy
+    cfg = copy.copy(llm_cfg)
+    return orig_call('', prompt, cfg)
 
 
 def extract_json(text):
@@ -243,6 +280,36 @@ def generate_content(topic, style='default', extra_instructions=''):
 
     # 清理标签格式（确保不带 #）
     output['tags'] = [t.lstrip('#').strip() for t in output['tags'] if t.strip()]
+
+    # 硬性字数限制（小红书标题20字、正文1000字）
+    if len(output['title']) > 20:
+        # 在20字内找最后一个标点或空格截断，保持语义完整
+        t = output['title'][:20]
+        for i in range(19, 14, -1):
+            if t[i] in '，。！？、·~…—|,!? ':
+                t = t[:i]
+                break
+        output['title'] = t
+        print(f"[内容生成] 标题超长已截断: {output['title']}", file=sys.stderr)
+
+    # 合规：正文末尾追加 AI 辅助创作声明
+    if output['content'] and not output['content'].rstrip().endswith('AI辅助创作'):
+        output['content'] = output['content'].rstrip() + '\n\n📝 本文由 AI 辅助创作'
+
+    # 正文硬截断（含声明后不超过1000字）
+    if len(output['content']) > 980:
+        # 在950字内找最后一个段落结尾截断
+        c = output['content'][:950]
+        last_para = c.rfind('\n\n')
+        if last_para > 600:
+            c = c[:last_para]
+        else:
+            last_nl = c.rfind('\n')
+            if last_nl > 600:
+                c = c[:last_nl]
+        # 重新追加声明
+        output['content'] = c.rstrip() + '\n\n📝 本文由 AI 辅助创作'
+        print(f"[内容生成] 正文超长已截断至 {len(output['content'])} 字", file=sys.stderr)
 
     return output
 

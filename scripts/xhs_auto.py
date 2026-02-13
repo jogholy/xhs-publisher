@@ -273,6 +273,12 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
     if tags:
         _add_tags(page, tags)
 
+    # 6.5 勾选「笔记含AI合成内容」声明（合规要求）
+    try:
+        _check_ai_declaration(page)
+    except Exception as e:
+        log.warning(f'AI声明勾选失败（不影响发布）: {e}')
+
     # 截图记录
     pre_publish_shot = SCREENSHOTS_DIR / f'pre_publish_{datetime.now():%Y%m%d_%H%M%S}.png'
     page.screenshot(path=str(pre_publish_shot), full_page=True)
@@ -303,21 +309,69 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
             publish_btn.wait_for(state='visible', timeout=5000)
             publish_btn.click()
             log.info('已点击发布按钮')
-            time.sleep(8)
+            time.sleep(5)
+
+            # 验证发布是否真的成功
+            publish_success = False
+            error_msg = None
+
+            # 检查1: 页面是否跳转离开发布页（成功发布后通常跳转到笔记管理）
+            current_url = page.url
+            if '/publish/publish' not in current_url:
+                publish_success = True
+                log.info(f'发布成功（页面已跳转: {current_url}）')
+
+            # 检查2: 页面上是否出现"发布成功"提示
+            if not publish_success:
+                success_loc = page.get_by_text('发布成功', exact=False)
+                if success_loc.count() > 0:
+                    publish_success = True
+                    log.info('发布成功（检测到成功提示）')
+
+            # 检查3: 检测错误提示（弹窗/toast）
+            if not publish_success:
+                for err_text in ['发布失败', '内容违规', '请修改', '超出限制', '字数超', '审核', '请检查']:
+                    err_loc = page.get_by_text(err_text, exact=False)
+                    for i in range(err_loc.count()):
+                        if err_loc.nth(i).is_visible():
+                            error_msg = f'页面提示: {err_loc.nth(i).text_content().strip()[:100]}'
+                            log.error(f'发布失败 — {error_msg}')
+                            break
+                    if error_msg:
+                        break
+
+            # 检查4: 再等几秒看是否跳转（有些情况跳转较慢）
+            if not publish_success and not error_msg:
+                time.sleep(5)
+                current_url = page.url
+                if '/publish/publish' not in current_url:
+                    publish_success = True
+                    log.info(f'发布成功（延迟跳转: {current_url}）')
 
             # 发布后截图
             post_shot = SCREENSHOTS_DIR / f'published_{datetime.now():%Y%m%d_%H%M%S}.png'
             page.screenshot(path=str(post_shot))
-            log.info(f'发布完成！截图: {post_shot}')
 
-            # 保存发布记录
-            _save_report(title, content, tags, True)
-
-            return {
-                'success': True,
-                'title': title,
-                'screenshot': str(post_shot)
-            }
+            if publish_success:
+                log.info(f'发布完成！截图: {post_shot}')
+                _save_report(title, content, tags, True)
+                return {
+                    'success': True,
+                    'title': title,
+                    'screenshot': str(post_shot)
+                }
+            elif error_msg:
+                raise RuntimeError(error_msg)
+            else:
+                # 没跳转也没报错，标记为不确定
+                log.warning('发布状态不确定（页面未跳转，未检测到成功/失败提示）')
+                _save_report(title, content, tags, False, '发布状态不确定')
+                return {
+                    'success': False,
+                    'error': '发布状态不确定，页面未跳转',
+                    'screenshot': str(post_shot),
+                    'uncertain': True,
+                }
 
         except Exception as e:
             log.warning(f'发布尝试 {attempt}/{max_publish_retries} 失败: {e}')
@@ -334,6 +388,40 @@ def publish_note(page, title, content, tags=None, images=None, dry_run=False, au
                     'screenshot': err_shot,
                     'retries': max_publish_retries,
                 }
+
+
+def _check_ai_declaration(page):
+    """勾选「笔记含AI合成内容」声明（小红书2026年2月新规合规要求）"""
+    import time as _time
+
+    # 先滚动到底部确保"内容设置"区域可见
+    page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+    _time.sleep(1)
+
+    # 点击「添加内容类型声明」展开下拉（用 locator + get_by_text）
+    decl_loc = page.get_by_text('添加内容类型声明', exact=True)
+    if decl_loc.count() == 0:
+        # 备选：模糊匹配
+        decl_loc = page.get_by_text('内容类型声明')
+    if decl_loc.count() == 0:
+        log.warning('未找到「添加内容类型声明」按钮')
+        return False
+
+    decl_loc.first.click()
+    _time.sleep(1.5)
+
+    # 点击「笔记含AI合成内容」
+    ai_loc = page.get_by_text('笔记含AI合成内容', exact=True)
+    if ai_loc.count() == 0:
+        ai_loc = page.get_by_text('AI合成内容')
+    if ai_loc.count() == 0:
+        log.warning('未找到「笔记含AI合成内容」选项')
+        return False
+
+    ai_loc.first.click()
+    _time.sleep(1)
+    log.info('已勾选「笔记含AI合成内容」声明')
+    return True
 
 
 def _add_tags(page, tags):
@@ -1030,6 +1118,148 @@ def cmd_engagement(args):
         ctx.close()
 
 
+def delete_notes(page, max_count=100):
+    """删除笔记管理页面上的所有笔记
+
+    Args:
+        page: Playwright page 对象（已登录状态）
+        max_count: 最多删除数量（防止无限循环）
+
+    Returns:
+        dict: {deleted: int, errors: list}
+    """
+    deleted = 0
+    errors = []
+
+    for round_num in range(max_count):
+        # 找包含"发布于"的元素（每个笔记卡片都有）
+        time_els = page.get_by_text('发布于', exact=False)
+        if time_els.count() == 0:
+            break
+
+        log.info(f'第 {round_num + 1} 轮，剩余 {time_els.count()} 篇笔记')
+
+        try:
+            # hover 第一个笔记卡片的父容器，让操作按钮显示
+            first = time_els.first
+            parent = first.evaluate_handle('el => { let p = el; for(let i=0;i<5;i++) p = p.parentElement; return p; }')
+            parent.as_element().hover()
+            time.sleep(1)
+
+            # 点击删除按钮
+            delete_btns = page.get_by_text('删除', exact=True)
+            visible = [delete_btns.nth(i) for i in range(delete_btns.count()) if delete_btns.nth(i).is_visible()]
+            if not visible:
+                log.warning('没有可见的删除按钮')
+                break
+
+            visible[0].click()
+            time.sleep(2)
+
+            # 点击确认弹窗
+            confirm = None
+            for text in ['确认删除', '确认', '确定']:
+                loc = page.get_by_text(text, exact=True)
+                for i in range(loc.count()):
+                    if loc.nth(i).is_visible():
+                        confirm = loc.nth(i)
+                        break
+                if confirm:
+                    break
+
+            # 也找 role=button 的确认
+            if not confirm:
+                btns = page.locator('button')
+                for i in range(btns.count()):
+                    t = btns.nth(i).text_content().strip()
+                    if t in ['确认删除', '确认', '确定'] and btns.nth(i).is_visible():
+                        confirm = btns.nth(i)
+                        break
+
+            if confirm:
+                confirm.click()
+                time.sleep(3)
+                deleted += 1
+                log.info(f'已删除第 {deleted} 篇')
+            else:
+                log.warning('未找到确认按钮，跳过')
+                # 按 Escape 关闭弹窗
+                page.keyboard.press('Escape')
+                time.sleep(1)
+                errors.append(f'第 {round_num + 1} 轮未找到确认按钮')
+                break
+
+        except Exception as e:
+            log.error(f'删除第 {round_num + 1} 篇时出错: {e}')
+            errors.append(str(e))
+            page.keyboard.press('Escape')
+            time.sleep(1)
+
+        # 滚动加载更多
+        page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+        time.sleep(2)
+
+    return {'deleted': deleted, 'errors': errors}
+
+
+def cmd_delete(args):
+    """删除已发布的笔记"""
+    from playwright.sync_api import sync_playwright
+
+    headless = getattr(args, 'headless', True)
+    confirm = getattr(args, 'yes', False)
+    tab = getattr(args, 'tab', 'all')
+
+    with sync_playwright() as pw:
+        ctx = create_browser_context(pw, headless=headless)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+        # 进入笔记管理
+        page.goto('https://creator.xiaohongshu.com/new/note-manager',
+                   wait_until='domcontentloaded', timeout=60000)
+        page.wait_for_timeout(5000)
+
+        # 切换 tab（全部/已发布/审核中/未通过）
+        tab_map = {'all': '全部笔记', 'published': '已发布', 'review': '审核中', 'failed': '未通过'}
+        tab_text = tab_map.get(tab, '全部笔记')
+        tab_loc = page.get_by_text(tab_text, exact=False)
+        if tab_loc.count() > 0:
+            tab_loc.first.click()
+            page.wait_for_timeout(3000)
+
+        # 统计笔记数
+        note_count = page.get_by_text('发布于', exact=False).count()
+        log.info(f'[{tab_text}] 找到 {note_count} 篇笔记')
+
+        if note_count == 0:
+            print(json.dumps({'deleted': 0, 'message': '没有笔记需要删除'}, ensure_ascii=False, indent=2))
+            ctx.close()
+            return
+
+        if not confirm:
+            print(f'即将删除 [{tab_text}] 下的 {note_count} 篇笔记（可能更多需滚动加载）')
+            print('使用 --yes 跳过确认，或按 Ctrl+C 取消')
+            try:
+                input('按 Enter 继续...')
+            except (KeyboardInterrupt, EOFError):
+                print('\n已取消')
+                ctx.close()
+                return
+
+        # 执行删除
+        result = delete_notes(page, max_count=getattr(args, 'max', 100))
+
+        # 截图确认
+        shot = SCREENSHOTS_DIR / f'after_delete_{datetime.now():%Y%m%d_%H%M%S}.png'
+        page.screenshot(path=str(shot))
+
+        result['screenshot'] = str(shot)
+        result['tab'] = tab_text
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        ctx.close()
+
+
 def cmd_keystore(args):
     """API Key 加密管理"""
     sys.path.insert(0, str(Path(__file__).parent))
@@ -1263,6 +1493,14 @@ def main():
     p_key.add_argument('--key-name', help='Key 名称')
     p_key.add_argument('--key-value', help='Key 值（set 操作用）')
 
+    # delete - 删除已发布笔记
+    p_del = sub.add_parser('delete', help='删除已发布的笔记')
+    p_del.add_argument('--tab', choices=['all', 'published', 'review', 'failed'],
+                       default='all', help='筛选: all/published/review/failed（默认 all）')
+    p_del.add_argument('--max', type=int, default=100, help='最多删除数量（默认100）')
+    p_del.add_argument('--yes', '-y', action='store_true', help='跳过确认直接删除')
+    p_del.add_argument('--headless', action='store_true', help='无头模式')
+
     args = parser.parse_args()
 
     if args.command == 'login':
@@ -1289,6 +1527,8 @@ def main():
         cmd_engagement(args)
     elif args.command == 'keystore':
         cmd_keystore(args)
+    elif args.command == 'delete':
+        cmd_delete(args)
     else:
         parser.print_help()
         sys.exit(1)

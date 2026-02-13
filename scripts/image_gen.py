@@ -10,6 +10,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 
 # 配置
 PROXY = 'http://127.0.0.1:7897'
@@ -86,6 +87,63 @@ def _test_proxy():
         return False
 
 
+def _add_ai_watermark(image_path):
+    """给图片右下角添加 'AI生成' 水印（合规要求：高度 ≥ 最短边 5%）"""
+    try:
+        img = Image.open(image_path)
+        w, h = img.size
+        min_side = min(w, h)
+        font_size = max(int(min_side * 0.05), 16)
+
+        draw = ImageDraw.Draw(img)
+
+        # 尝试加载中文字体
+        font = None
+        font_paths = [
+            '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    font = ImageFont.truetype(fp, font_size)
+                    break
+                except Exception:
+                    continue
+        if not font:
+            font = ImageFont.load_default()
+
+        text = 'AI生成'
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+        # 右下角，留 10px 边距
+        margin = 10
+        x = w - tw - margin
+        y = h - th - margin
+
+        # 半透明背景
+        bg_padding = 4
+        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        overlay_draw.rectangle(
+            [x - bg_padding, y - bg_padding, x + tw + bg_padding, y + th + bg_padding],
+            fill=(0, 0, 0, 128)
+        )
+        overlay_draw.text((x, y), text, fill=(255, 255, 255, 220), font=font)
+
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        img = Image.alpha_composite(img, overlay)
+        img = img.convert('RGB')
+        img.save(image_path)
+        print(f'[图片生成] 已添加 AI 水印: {image_path}', file=sys.stderr)
+    except Exception as e:
+        print(f'[图片生成] AI 水印添加失败（不影响发布）: {e}', file=sys.stderr)
+
+
 def generate_image(prompt, output_path, resolution='1K'):
     """
     生成图片，优先 nano-banana-pro，降级 qwen-image
@@ -108,6 +166,7 @@ def generate_image(prompt, output_path, resolution='1K'):
             print(f'[图片生成] 代理可用，使用 nano-banana-pro (Gemini)', file=sys.stderr)
             result = _run_nano_banana(prompt, output_path, resolution, gemini_key)
             if result['success']:
+                _add_ai_watermark(result['path'])
                 return result
             print(f'[图片生成] nano-banana-pro 失败: {result.get("error", "未知错误")}', file=sys.stderr)
         else:
@@ -119,6 +178,7 @@ def generate_image(prompt, output_path, resolution='1K'):
         print(f'[图片生成] 降级使用 qwen-image (通义万相)', file=sys.stderr)
         result = _run_qwen_image(prompt, output_path, qwen_key)
         if result['success']:
+            _add_ai_watermark(result['path'])
             return result
         print(f'[图片生成] qwen-image 也失败: {result.get("error", "未知错误")}', file=sys.stderr)
 
